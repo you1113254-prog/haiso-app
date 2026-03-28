@@ -2,12 +2,24 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
+CREDENTIALS_FILE = "/Users/youichi/Desktop/配送AI/credentials.json"
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
+
+SHEET_NAMES = [
+    "宜野座　と金武1〜3",
+    "恩納村",
+    "石川1　〜4",
+    "読谷",
+    "うるま",
+    "本部、今帰仁",
+    "勝連",
+    "沖縄市",
+]
 
 @st.cache_resource
 def connect_sheets():
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
     return gspread.authorize(creds)
 
 @st.cache_data(ttl=60)
@@ -15,17 +27,15 @@ def load_all_data():
     client = connect_sheets()
     spreadsheet = client.open_by_url(SPREADSHEET_URL)
     all_data = []
-    skip = ["金武宜野座コメント","1月北部","1月北部 のリスト","1月北部 のリスト のコピー"]
-    for sheet in spreadsheet.worksheets():
-        if sheet.title in skip:
-            continue
+    for sheet_name in SHEET_NAMES:
         try:
+            sheet = spreadsheet.worksheet(sheet_name)
             records = sheet.get_all_records()
             for row in records:
-                row["エリア"] = sheet.title
+                row["エリア"] = sheet_name
             all_data.extend(records)
         except Exception as e:
-            st.warning(f"⚠️ {sheet.title} スキップ：{e}")
+            st.warning(f"⚠️ {sheet_name} スキップ：{e}")
     return all_data
 
 st.set_page_config(page_title="灯油配送アプリ", page_icon="🛢️", layout="centered")
