@@ -1,6 +1,5 @@
 import streamlit as st
 import gspread
-from google.oauth2.service_account import Credentials
 
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
 
@@ -17,7 +16,6 @@ SHEET_NAMES = [
 
 @st.cache_resource
 def connect_sheets():
-    import json
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     from google.oauth2.service_account import Credentials
@@ -35,8 +33,11 @@ def load_all_data():
             sheet = spreadsheet.worksheet(sheet_name)
             records = sheet.get_all_records()
             for row in records:
+                # 空白行を除外（顧客コードが空のものをスキップ）
+                if not row.get("顧客コード") and not row.get("名前"):
+                    continue
                 row["エリア"] = sheet_name
-            all_data.extend(records)
+                all_data.append(row)
         except Exception as e:
             st.warning(f"⚠️ {sheet_name} スキップ：{e}")
     return all_data
