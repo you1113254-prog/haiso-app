@@ -2,7 +2,6 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-CREDENTIALS_FILE = "/Users/youichi/Desktop/配送AI/credentials.json"
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
 
 SHEET_NAMES = [
@@ -19,7 +18,7 @@ SHEET_NAMES = [
 @st.cache_resource
 def connect_sheets():
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
     return gspread.authorize(creds)
 
 @st.cache_data(ttl=60)
