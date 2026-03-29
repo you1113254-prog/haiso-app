@@ -1,5 +1,6 @@
 import streamlit as st
 import gspread
+import datetime
 
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
 
@@ -53,7 +54,7 @@ except Exception as e:
     st.error(f"❌ 読み込みエラー：{e}")
     st.stop()
 
-tab1, tab2, tab3 = st.tabs(["🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索", "📋 今日の配送リスト"])
 
 def show_results(results):
     if results:
@@ -81,3 +82,99 @@ with tab3:
     k = st.text_input("住所の一部を入力", key="addr")
     if k:
         show_results([r for r in data if k in str(r.get("住所",""))])
+
+# ── 今日の配送リスト ──────────────────────────────────────────
+with tab4:
+    st.subheader("📋 今日の配送リスト")
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    st.caption(f"📅 配送日：{today_str}")
+
+    area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="delivery_area")
+    area_data = [r for r in data if r.get("エリア") == area]
+
+    if not area_data:
+        st.warning("このエリアに顧客データがありません")
+    else:
+        st.info(f"📦 {len(area_data)} 件の顧客が見つかりました")
+
+        with st.form("delivery_form"):
+            records = []
+            for i, row in enumerate(area_data):
+                st.markdown(
+                    f"**{row.get('名前', '---')}**　｜　"
+                    f"顧客コード: `{row.get('顧客コード', '---')}`"
+                )
+                st.caption(f"📍 {row.get('住所', '---')}")
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    visited = st.checkbox("✅ 訪問済み", key=f"visited_{i}")
+                with col2:
+                    supply = st.number_input(
+                        "🛢 補給量 (L)",
+                        min_value=0,
+                        step=18,
+                        key=f"supply_{i}"
+                    )
+                with col3:
+                    absent = st.checkbox("🚪 不在", key=f"absent_{i}")
+                with col4:
+                    rental = st.checkbox("📄 レンタル伝票投函", key=f"rental_{i}")
+
+                st.markdown("---")
+
+                records.append({
+                    "日付":           today_str,
+                    "エリア":         area,
+                    "顧客コード":     str(row.get("顧客コード", "")),
+                    "名前":           str(row.get("名前", "")),
+                    "住所":           str(row.get("住所", "")),
+                    "訪問済み":       visited,
+                    "補給量(L)":      supply,
+                    "不在":           absent,
+                    "レンタル伝票投函": rental,
+                })
+
+            submitted = st.form_submit_button(
+                "💾 スプレッドシートに保存する",
+                use_container_width=True
+            )
+
+        if submitted:
+            try:
+                client = connect_sheets()
+                spreadsheet = client.open_by_url(SPREADSHEET_URL)
+
+                # 「配送記録」シートを取得。なければ新規作成
+                try:
+                    record_sheet = spreadsheet.worksheet("配送記録")
+                except Exception:
+                    record_sheet = spreadsheet.add_worksheet(
+                        title="配送記録", rows=1000, cols=10
+                    )
+                    # ヘッダー行を追加
+                    record_sheet.append_row([
+                        "日付", "エリア", "顧客コード", "名前", "住所",
+                        "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
+                    ])
+
+                # 全顧客分をまとめて追記
+                rows_to_append = []
+                for rec in records:
+                    rows_to_append.append([
+                        rec["日付"],
+                        rec["エリア"],
+                        rec["顧客コード"],
+                        rec["名前"],
+                        rec["住所"],
+                        "✓" if rec["訪問済み"] else "",
+                        rec["補給量(L)"] if rec["補給量(L)"] > 0 else "",
+                        "✓" if rec["不在"] else "",
+                        "✓" if rec["レンタル伝票投函"] else "",
+                    ])
+
+                record_sheet.append_rows(rows_to_append)
+                st.success(f"✅ {len(records)} 件の配送記録をスプレッドシートに保存しました！")
+
+            except Exception as e:
+                st.error(f"❌ 保存エラー：{e}")
