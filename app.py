@@ -5,9 +5,9 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
 
 SHEET_NAMES = [
-    "宜野座　と金武1〜3",
+    "宜野座 と金武1～3",
     "恩納村",
-    "石川1　〜4",
+    "石川1 ～4",
     "読谷",
     "うるま",
     "本部、今帰仁",
@@ -17,8 +17,12 @@ SHEET_NAMES = [
 
 @st.cache_resource
 def connect_sheets():
+    import json
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+    from google.oauth2.service_account import Credentials
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     return gspread.authorize(creds)
 
 @st.cache_data(ttl=60)
