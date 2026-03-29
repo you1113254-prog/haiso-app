@@ -44,6 +44,36 @@ def load_all_data():
     return all_data
 
 st.set_page_config(page_title="灯油配送アプリ", page_icon="🛢️", layout="centered")
+
+# ── パスワード認証 ────────────────────────────────────────────
+PASSWORD = "haiso2026"
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🛢️ 灯油配送アプリ")
+    st.markdown("---")
+    st.subheader("🔒 ログイン")
+    with st.form("login_form"):
+        pw = st.text_input("パスワードを入力してください", type="password")
+        login_btn = st.form_submit_button("ログイン", use_container_width=True)
+    if login_btn:
+        if pw == PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("❌ パスワードが違います")
+    st.stop()
+
+# ログアウトボタン（サイドバー）
+with st.sidebar:
+    st.write("🛢️ 灯油配送アプリ")
+    if st.button("🔓 ログアウト", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
+
+# ── メインアプリ ──────────────────────────────────────────────
 st.title("🛢️ 灯油配送アプリ")
 st.write("名前・顧客コード・住所の一部を入れて検索できます。")
 
