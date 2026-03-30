@@ -316,73 +316,106 @@ with tab5:
 with tab6:
     st.subheader("⚠️ 未訪問・伝票漏れアラート")
 
-    alert_date = st.date_input(
-        "📅 確認する日付を選択", value=datetime.date.today(), key="alert_date"
-    )
-    alert_date_str = alert_date.strftime("%Y-%m-%d")
+    _today        = datetime.date.today()
+    _month_prefix = _today.strftime("%Y-%m")          # 例: "2026-03"
+    st.caption(f"📅 対象月：{_today.year}年{_today.month}月（今月固定）")
 
-    if st.button("🔍 アラートを確認する", use_container_width=True, key="check_alerts"):
+    if st.button("🔍 今月のアラートを確認する", use_container_width=True, key="check_alerts"):
         try:
-            client = connect_sheets()
+            client     = connect_sheets()
             spreadsheet = client.open_by_url(SPREADSHEET_URL)
 
             try:
                 record_sheet = spreadsheet.worksheet("配送記録")
-                all_records = record_sheet.get_all_records()
+                all_records  = record_sheet.get_all_records()
             except Exception:
                 st.warning("⚠️ 配送記録シートが見つかりません。先に配送記録を保存してください。")
                 st.stop()
 
-            # 選択した日付の記録だけ絞り込む
-            day_records = [
+            # 今月の記録だけ絞り込む
+            month_records = [
                 r for r in all_records
-                if str(r.get("日付", "")).strip() == alert_date_str
+                if str(r.get("日付", "")).strip().startswith(_month_prefix)
             ]
+            st.info(
+                f"📋 {_today.year}年{_today.month}月の配送記録：{len(month_records)} 件 ／ "
+                f"顧客マスター：{len(data)} 件"
+            )
+            st.markdown("---")
 
-            if not day_records:
-                st.info(f"📭 {alert_date_str} の配送記録はありません")
-            else:
-                st.info(f"📋 {alert_date_str} の記録：{len(day_records)} 件")
-                st.markdown("---")
+            # 今月1度でも訪問済み（✓）になった顧客コードのセット
+            visited_codes = {
+                str(r.get("顧客コード", "")).strip()
+                for r in month_records
+                if str(r.get("訪問済み", "")).strip() == "✓"
+            }
 
-                # 未訪問（訪問済みが ✓ でない）
+            # 今月1度でも伝票投函済み（✓）になったレンタル顧客コードのセット
+            rental_done_codes = {
+                str(r.get("顧客コード", "")).strip()
+                for r in month_records
+                if str(r.get("レンタル伝票投函", "")).strip() == "✓"
+            }
+
+            total_unvisited    = 0
+            total_rental_missed = 0
+
+            for area_name in SHEET_NAMES:
+                area_customers = [r for r in data if r.get("エリア") == area_name]
+                if not area_customers:
+                    continue
+
+                # 今月1度も訪問済み記録がない顧客（顧客マスター基準）
                 unvisited = [
-                    r for r in day_records
-                    if str(r.get("訪問済み", "")).strip() != "✓"
+                    c for c in area_customers
+                    if str(c.get("顧客コード", "")).strip() not in visited_codes
                 ]
 
-                # レンタル顧客（顧客コード末尾がR）で伝票投函が ✓ でない
+                # レンタル顧客（末尾R）で今月伝票投函記録がない顧客
                 rental_missed = [
-                    r for r in day_records
-                    if str(r.get("顧客コード", "")).strip().upper().endswith("R")
-                    and str(r.get("レンタル伝票投函", "")).strip() != "✓"
+                    c for c in area_customers
+                    if str(c.get("顧客コード", "")).strip().upper().endswith("R")
+                    and str(c.get("顧客コード", "")).strip() not in rental_done_codes
                 ]
 
-                # ── 未訪問リスト ──
-                st.markdown("### 🚶 今日まだ行っていない顧客")
-                if unvisited:
-                    for r in unvisited:
-                        st.warning(
-                            f"**{r.get('名前', '---')}**　｜　"
-                            f"顧客コード: `{r.get('顧客コード', '---')}`　｜　"
-                            f"エリア: {r.get('エリア', '---')}"
-                        )
-                else:
-                    st.success("✅ 全員訪問済みです！")
+                if not unvisited and not rental_missed:
+                    continue
 
-                st.markdown("---")
+                total_unvisited     += len(unvisited)
+                total_rental_missed += len(rental_missed)
 
-                # ── 伝票投函漏れリスト ──
-                st.markdown("### 📄 伝票投函漏れの顧客（レンタル）")
-                if rental_missed:
-                    for r in rental_missed:
-                        st.error(
-                            f"**{r.get('名前', '---')}**　｜　"
-                            f"顧客コード: `{r.get('顧客コード', '---')}`　｜　"
-                            f"エリア: {r.get('エリア', '---')}"
-                        )
-                else:
-                    st.success("✅ 伝票投函漏れはありません！")
+                with st.expander(
+                    f"📍 {area_name}　"
+                    f"（未訪問 {len(unvisited)}件 ／ 伝票漏れ {len(rental_missed)}件）",
+                    expanded=True,
+                ):
+                    # 未訪問リスト（黄色）
+                    if unvisited:
+                        st.markdown("**🚶 今月まだ訪問記録がない顧客**")
+                        for c in unvisited:
+                            st.warning(
+                                f"**{c.get('名前', '---')}**　｜　"
+                                f"顧客コード: `{c.get('顧客コード', '---')}`"
+                            )
+
+                    # 伝票投函漏れリスト（赤）
+                    if rental_missed:
+                        st.markdown("**📄 今月伝票投函記録がないレンタル顧客**")
+                        for c in rental_missed:
+                            st.error(
+                                f"**{c.get('名前', '---')}**　｜　"
+                                f"顧客コード: `{c.get('顧客コード', '---')}`"
+                            )
+
+            # ── 集計サマリー ──
+            st.markdown("---")
+            if total_unvisited == 0 and total_rental_missed == 0:
+                st.success("✅ 今月は全顧客に訪問済み・伝票投函漏れもありません！")
+            else:
+                st.info(
+                    f"📊 合計：未訪問 **{total_unvisited}** 件 ／ "
+                    f"伝票投函漏れ **{total_rental_missed}** 件"
+                )
 
         except Exception as e:
             st.error(f"❌ 読み込みエラー：{e}")
