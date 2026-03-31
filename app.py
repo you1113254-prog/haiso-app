@@ -737,13 +737,13 @@ with tab7:
     if not mgmt_area_data:
         st.warning("このエリアに顧客データがありません")
     else:
-        for row in mgmt_area_data:
+        for i, row in enumerate(mgmt_area_data):
             code = str(row.get("顧客コード", "")).strip()
             name = str(row.get("名前", "")).strip()
             addr = str(row.get("住所", "")).strip()
 
-            # エリア名＋顧客コードをキーに使い、エリア切替でも混在しない
-            safe_key = f"{mgmt_area}__{code}"
+            # 行番号＋顧客コードでキーを生成（重複コードがあっても衝突しない）
+            safe_key = f"{i}_{code.replace(' ', '_')}"
 
             # 表示タイトル：名前（コード: 顧客コード）形式
             label = f"{name}（コード: {code}）" if code else f"{name}（コード未設定）"
