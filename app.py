@@ -116,11 +116,35 @@ def show_results(results):
         st.write(f"**住所:** {row.get('住所','---')}")
         st.write(f"**エリア:** {row.get('エリア','---')}")
 
-        # ── 配送履歴 ──────────────────────────────────────────
+        # ── 配送履歴（この顧客の全記録） ─────────────────────────
         history = [
             r for r in all_delivery
             if code and str(r.get("顧客コード", "")).strip() == code
         ]
+
+        # ── 最終補給情報 ──────────────────────────────────────
+        supply_records = []
+        for _h in history:
+            try:
+                _sp = float(_h.get("補給量(L)", 0) or 0)
+            except (ValueError, TypeError):
+                _sp = 0.0
+            if _sp > 0:
+                supply_records.append((str(_h.get("日付", "")), _sp))
+
+        if supply_records:
+            supply_records.sort(key=lambda x: x[0], reverse=True)   # 新しい順
+            _last_date_str, _last_supply = supply_records[0]
+            try:
+                _last_date = datetime.date.fromisoformat(_last_date_str)
+                _days_ago  = (datetime.date.today() - _last_date).days
+                _date_jp   = f"{_last_date.year}年{_last_date.month}月{_last_date.day}日"
+                st.write(f"🗓️ **最終補給日：** {_date_jp}（{_days_ago}日前）")
+            except ValueError:
+                st.write(f"🗓️ **最終補給日：** {_last_date_str}")
+            st.write(f"🛢️ **最終補給量：** {_last_supply:.2f} L")
+        else:
+            st.caption("📭 補給記録なし")
 
         if history:
             with st.expander(f"📦 配送履歴（{len(history)}件）を見る"):
