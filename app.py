@@ -24,7 +24,7 @@ def connect_sheets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     return gspread.authorize(creds)
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_all_data():
     client = connect_sheets()
     spreadsheet = client.open_by_url(SPREADSHEET_URL)
@@ -43,7 +43,7 @@ def load_all_data():
             st.warning(f"⚠️ {sheet_name} スキップ：{e}")
     return all_data
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_delivery_records():
     """配送記録シートを全件取得。シートが存在しない場合は空リストを返す。"""
     try:
