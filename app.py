@@ -663,6 +663,50 @@ with tab7:
                 except Exception as e:
                     st.error(f"❌ 追加エラー：{e}")
 
+    # ── 新規エリア追加 ─────────────────────────────────────────
+    with st.expander("➕ 新規エリアを追加する"):
+        with st.form("add_area_form"):
+            new_area_name = st.text_input("新しいエリア名 *", key="new_area_name")
+            add_area_btn = st.form_submit_button("エリアを追加する", use_container_width=True)
+
+        if add_area_btn:
+            _area_stripped = new_area_name.strip()
+            if not _area_stripped:
+                st.error("❌ エリア名を入力してください")
+            elif _area_stripped in SHEET_NAMES:
+                st.error(f"❌ エリア『{_area_stripped}』はすでに存在します")
+            else:
+                try:
+                    # Googleスプレッドシートに新しいシートを作成
+                    client = connect_sheets()
+                    spreadsheet = client.open_by_url(SPREADSHEET_URL)
+                    new_sheet = spreadsheet.add_worksheet(
+                        title=_area_stripped, rows=500, cols=10
+                    )
+                    # ヘッダー行を追加
+                    new_sheet.append_row(["レコードID", "顧客コード", "名前", "住所"])
+
+                    # app.py の SHEET_NAMES リストに新しいエリア名を追加
+                    import re as _re
+                    _app_path = __file__
+                    with open(_app_path, "r", encoding="utf-8") as _f:
+                        _src = _f.read()
+                    _new_entry = f'    "{_area_stripped}",\n'
+                    _src = _re.sub(
+                        r'(SHEET_NAMES\s*=\s*\[[\s\S]*?)(]\s*\n)',
+                        lambda m: m.group(1) + _new_entry + m.group(2),
+                        _src,
+                        count=1,
+                    )
+                    with open(_app_path, "w", encoding="utf-8") as _f:
+                        _f.write(_src)
+
+                    st.success(f"✅ エリア『{_area_stripped}』を追加しました")
+                    load_all_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ エリア追加エラー：{e}")
+
     st.markdown("---")
     st.subheader("✏️ 既存顧客の編集")
 
