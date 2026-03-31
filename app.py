@@ -658,7 +658,7 @@ with tab7:
                     sheet.append_row(new_row)
 
                     st.success(f"✅ {new_name.strip()} を追加しました！")
-                    load_all_data.clear()
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ 追加エラー：{e}")
@@ -745,7 +745,7 @@ with tab7:
                             sheet.update_cell(target_row, name_col + 1, edit_name)
                             sheet.update_cell(target_row, addr_col + 1, edit_addr)
                             st.success(f"✅ {edit_name} の情報を更新しました！")
-                            load_all_data.clear()
+                            st.cache_data.clear()
                             st.rerun()
                         else:
                             st.error("❌ 顧客コードがシートで見つかりませんでした")
