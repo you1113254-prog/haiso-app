@@ -146,8 +146,9 @@ with tab4:
                 with col2:
                     supply = st.number_input(
                         "🛢 補給量 (L)",
-                        min_value=0,
-                        step=18,
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
                         key=f"supply_{i}"
                     )
                 with col3:
@@ -246,8 +247,9 @@ with tab5:
                 with col2:
                     rec_supply = st.number_input(
                         "🛢 補給量 (L)",
-                        min_value=0,
-                        step=18,
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
                         key=f"rec_supply_{i}"
                     )
                 with col3:
