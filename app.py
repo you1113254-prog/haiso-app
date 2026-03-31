@@ -630,7 +630,9 @@ with tab7:
 
     mgmt_area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="mgmt_area")
     try:
-        _mgmt_sheet = spreadsheet.worksheet(mgmt_area)
+        _mgmt_client = connect_sheets()
+        _mgmt_spreadsheet = _mgmt_client.open_by_url(SPREADSHEET_URL)
+        _mgmt_sheet = _mgmt_spreadsheet.worksheet(mgmt_area)
         _all_values = _mgmt_sheet.get_all_values()
         mgmt_area_data = []
         if len(_all_values) > 1:
