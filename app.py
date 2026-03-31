@@ -629,7 +629,16 @@ with tab7:
     st.subheader("👤 顧客管理")
 
     mgmt_area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="mgmt_area")
-    mgmt_area_data = [r for r in data if r.get("エリア") == mgmt_area]
+    try:
+        _mgmt_sheet = spreadsheet.worksheet(mgmt_area)
+        _mgmt_raw = _mgmt_sheet.get_all_records()
+        mgmt_area_data = []
+        for r in _mgmt_raw:
+            r2 = {str(k).strip(): str(v).strip() for k, v in r.items()}
+            r2["エリア"] = mgmt_area
+            mgmt_area_data.append(r2)
+    except Exception:
+        mgmt_area_data = []
     st.info(f"📋 {len(mgmt_area_data)} 件の顧客が登録されています")
 
     # ── 新規顧客追加 ──────────────────────────────────────────
