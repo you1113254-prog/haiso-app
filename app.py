@@ -680,23 +680,30 @@ with tab8:
                   </p>
                 </div>"""
 
-                st.markdown(nippo_html, unsafe_allow_html=True)
+                # components.html() は Markdown を介さず直接 HTML レンダリングするため
+                # インデントによるコードブロック誤解釈が発生しない
+                import streamlit.components.v1 as _components
 
-                # 🖨️ 印刷ボタン
-                st.markdown("""
-                <div style="margin-top:20px;">
-                  <button onclick="window.print()" style="
-                    background-color:#1f77b4;
-                    color:white;
-                    padding:12px 36px;
-                    border:none;
-                    border-radius:6px;
-                    cursor:pointer;
-                    font-size:16px;
-                    font-weight:bold;
-                  ">🖨️ 印刷</button>
-                </div>
-                """, unsafe_allow_html=True)
+                _full_html = (
+                    "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'>"
+                    "<style>"
+                    "body{font-family:'Hiragino Sans','Meiryo','Yu Gothic',sans-serif;margin:16px;}"
+                    "@media print{.no-print{display:none!important;}}"
+                    "</style></head><body>"
+                    + nippo_html
+                    + "<div class='no-print' style='margin-top:20px;'>"
+                    "<button onclick='window.print()' style='"
+                    "background-color:#1f77b4;color:white;padding:12px 36px;"
+                    "border:none;border-radius:6px;cursor:pointer;"
+                    "font-size:16px;font-weight:bold;'>🖨️ 印刷</button>"
+                    "</div></body></html>"
+                )
+
+                _components.html(
+                    _full_html,
+                    height=max(520, len(day_records) * 46 + 320),
+                    scrolling=True,
+                )
 
         except Exception as e:
             st.error(f"❌ 読み込みエラー：{e}")
