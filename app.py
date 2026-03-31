@@ -43,6 +43,17 @@ def load_all_data():
             st.warning(f"⚠️ {sheet_name} スキップ：{e}")
     return all_data
 
+@st.cache_data(ttl=60)
+def load_delivery_records():
+    """配送記録シートを全件取得。シートが存在しない場合は空リストを返す。"""
+    try:
+        client = connect_sheets()
+        spreadsheet = client.open_by_url(SPREADSHEET_URL)
+        sheet = spreadsheet.worksheet("配送記録")
+        return sheet.get_all_records()
+    except Exception:
+        return []
+
 st.set_page_config(page_title="灯油配送アプリ", page_icon="🛢️", layout="centered")
 
 # ── パスワード認証 ────────────────────────────────────────────
@@ -84,23 +95,82 @@ except Exception as e:
     st.error(f"❌ 読み込みエラー：{e}")
     st.stop()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索",
     "📋 今日の配送リスト", "📝 配送記録入力",
-    "⚠️ アラート", "👤 顧客管理",
+    "⚠️ アラート", "👤 顧客管理", "📊 日報",
 ])
 
 def show_results(results):
-    if results:
-        st.success(f"{len(results)}件見つかりました")
-        for row in results:
-            st.write(f"**顧客コード:** {row.get('顧客コード','---')}")
-            st.write(f"**名前:** {row.get('名前','---')}")
-            st.write(f"**住所:** {row.get('住所','---')}")
-            st.write(f"**エリア:** {row.get('エリア','---')}")
-            st.markdown("---")
-    else:
+    if not results:
         st.warning("該当なし")
+        return
+
+    st.success(f"{len(results)}件見つかりました")
+    all_delivery = load_delivery_records()   # キャッシュ済みなので高速
+
+    for row in results:
+        code = str(row.get("顧客コード", "")).strip()
+        st.write(f"**顧客コード:** {code or '---'}")
+        st.write(f"**名前:** {row.get('名前','---')}")
+        st.write(f"**住所:** {row.get('住所','---')}")
+        st.write(f"**エリア:** {row.get('エリア','---')}")
+
+        # ── 配送履歴 ──────────────────────────────────────────
+        history = [
+            r for r in all_delivery
+            if code and str(r.get("顧客コード", "")).strip() == code
+        ]
+
+        if history:
+            with st.expander(f"📦 配送履歴（{len(history)}件）を見る"):
+                # 月別集計
+                monthly: dict = {}
+                for h in history:
+                    date_str = str(h.get("日付", ""))
+                    try:
+                        supply = float(h.get("補給量(L)", 0) or 0)
+                    except (ValueError, TypeError):
+                        supply = 0.0
+                    if len(date_str) >= 7:
+                        ym = date_str[:7]                 # "YYYY-MM"
+                        y, m = ym[:4], ym[5:7].lstrip("0") or "0"
+                        label = f"{y}年{m}月"
+                    else:
+                        label = "不明"
+                    monthly[label] = monthly.get(label, 0.0) + supply
+
+                # 月別補給量（新しい月順）
+                st.markdown("**📅 月別補給量**")
+                for label in sorted(monthly.keys(), reverse=True):
+                    st.write(f"　・{label}：**{monthly[label]:.2f} L**")
+
+                # 年間合計・月平均
+                total_all = sum(monthly.values())
+                active_months = len([v for v in monthly.values() if v > 0])
+                monthly_avg = total_all / active_months if active_months else 0.0
+                st.info(
+                    f"📊 年間合計：**{total_all:.2f} L**　｜　"
+                    f"月平均：**{monthly_avg:.2f} L**（{active_months}か月分）"
+                )
+
+                st.markdown("---")
+
+                # 個別履歴一覧（新しい順）
+                st.markdown("**📋 訪問履歴一覧**")
+                for h in sorted(history, key=lambda x: str(x.get("日付", "")), reverse=True):
+                    d = str(h.get("日付", "---"))
+                    try:
+                        sp = float(h.get("補給量(L)", 0) or 0)
+                    except (ValueError, TypeError):
+                        sp = 0.0
+                    absent = "🚪不在　" if str(h.get("不在", "")).strip() == "✓" else ""
+                    rental = "📄伝票あり" if str(h.get("レンタル伝票投函", "")).strip() == "✓" else ""
+                    st.write(f"**{d}**　補給量: {sp:.2f} L　{absent}{rental}")
+        else:
+            st.caption("（配送記録なし）")
+
+        st.markdown("---")
 
 with tab1:
     k = st.text_input("名前の一部を入力", key="name")
@@ -510,3 +580,123 @@ with tab7:
 
                     except Exception as e:
                         st.error(f"❌ 更新エラー：{e}")
+
+# ── 日報 ──────────────────────────────────────────────────────
+with tab8:
+    st.subheader("📊 日報")
+
+    # 印刷時に Streamlit の UI 要素を非表示にする CSS
+    st.markdown("""
+    <style>
+    @media print {
+        header, footer, section[data-testid="stSidebar"],
+        div[data-testid="stToolbar"], div[data-testid="stDecoration"],
+        .stButton, .stDateInput, .stSelectbox, .block-container > div:first-child {
+            display: none !important;
+        }
+        #nippo-print-area { margin: 0; padding: 0; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    nippo_date = st.date_input(
+        "📅 日付を選択", value=datetime.date.today(), key="nippo_date"
+    )
+    nippo_date_str = nippo_date.strftime("%Y-%m-%d")
+    nippo_date_jp  = f"{nippo_date.year}年{nippo_date.month}月{nippo_date.day}日"
+
+    if st.button("📊 日報を表示", use_container_width=True, key="show_nippo"):
+        try:
+            day_records = [
+                r for r in load_delivery_records()
+                if str(r.get("日付", "")).strip() == nippo_date_str
+            ]
+
+            if not day_records:
+                st.info(f"📭 {nippo_date_jp} の配送記録はありません")
+            else:
+                # 合計補給量
+                total_supply = 0.0
+                for r in day_records:
+                    try:
+                        total_supply += float(r.get("補給量(L)", 0) or 0)
+                    except (ValueError, TypeError):
+                        pass
+
+                # テーブル行 HTML を組み立てる
+                rows_html = ""
+                for idx, r in enumerate(day_records, 1):
+                    try:
+                        sp = float(r.get("補給量(L)", 0) or 0)
+                    except (ValueError, TypeError):
+                        sp = 0.0
+                    sp_str   = f"{sp:.2f}" if sp > 0 else "―"
+                    rental   = "✓" if str(r.get("レンタル伝票投函", "")).strip() == "✓" else ""
+                    time_str = str(r.get("時間", "")).strip()
+                    absent   = "不在" if str(r.get("不在", "")).strip() == "✓" else ""
+                    row_bg   = "#fff8f0" if absent else "white"
+
+                    rows_html += f"""
+                    <tr style="background:{row_bg};">
+                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{idx}</td>
+                      <td style="padding:7px 10px;border:1px solid #ccc;">{r.get('顧客コード','')}</td>
+                      <td style="padding:7px 10px;border:1px solid #ccc;font-weight:bold;">{r.get('名前','')}</td>
+                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{time_str}</td>
+                      <td style="text-align:right;padding:7px 10px;border:1px solid #ccc;">{sp_str}</td>
+                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{rental}</td>
+                    </tr>"""
+
+                nippo_html = f"""
+                <div id="nippo-print-area" style="font-family:'Hiragino Sans','Meiryo',sans-serif;max-width:800px;margin:0 auto;padding:20px;">
+                  <h2 style="text-align:center;border-bottom:3px solid #1f77b4;padding-bottom:10px;color:#1f77b4;">
+                    🛢️ 灯油配送　日報
+                  </h2>
+                  <p style="text-align:right;font-size:16px;margin-bottom:16px;">
+                    <strong>配送日：{nippo_date_jp}</strong>
+                  </p>
+                  <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                    <thead>
+                      <tr style="background:#1f77b4;color:white;">
+                        <th style="padding:8px 10px;border:1px solid #ccc;width:40px;">No.</th>
+                        <th style="padding:8px 10px;border:1px solid #ccc;">顧客コード</th>
+                        <th style="padding:8px 10px;border:1px solid #ccc;">名前</th>
+                        <th style="padding:8px 10px;border:1px solid #ccc;width:80px;">時間</th>
+                        <th style="padding:8px 10px;border:1px solid #ccc;width:110px;">補給量 (L)</th>
+                        <th style="padding:8px 10px;border:1px solid #ccc;width:90px;">レンタル伝票</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows_html}
+                      <tr style="background:#e8f0fe;font-weight:bold;">
+                        <td colspan="4" style="text-align:right;padding:8px 10px;border:1px solid #ccc;">合計</td>
+                        <td style="text-align:right;padding:8px 10px;border:1px solid #ccc;">{total_supply:.2f}</td>
+                        <td style="border:1px solid #ccc;"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p style="margin-top:16px;font-size:15px;">
+                    件数：<strong>{len(day_records)} 件</strong>
+                    合計補給量：<strong>{total_supply:.2f} L</strong>
+                  </p>
+                </div>"""
+
+                st.markdown(nippo_html, unsafe_allow_html=True)
+
+                # 🖨️ 印刷ボタン
+                st.markdown("""
+                <div style="margin-top:20px;">
+                  <button onclick="window.print()" style="
+                    background-color:#1f77b4;
+                    color:white;
+                    padding:12px 36px;
+                    border:none;
+                    border-radius:6px;
+                    cursor:pointer;
+                    font-size:16px;
+                    font-weight:bold;
+                  ">🖨️ 印刷</button>
+                </div>
+                """, unsafe_allow_html=True)
+
+        except Exception as e:
+            st.error(f"❌ 読み込みエラー：{e}")
