@@ -737,11 +737,15 @@ with tab7:
     else:
         for i, row in enumerate(mgmt_area_data):
             code = str(row.get("顧客コード", "")).strip()
-            name = str(row.get("名前", ""))
-            with st.expander(f"**{name}**　（コード: {code}）"):
+            name = str(row.get("名前", "")).strip()
+            addr = str(row.get("住所", "")).strip()
+            # 顧客コードと名前で表示名を生成（住所が空でもズレない）
+            label = f"{name}　（コード: {code}）" if code else f"{name}　（コード未設定）"
+            with st.expander(label):
                 with st.form(f"edit_form_{i}"):
                     edit_name = st.text_input("名前", value=name, key=f"edit_name_{i}")
-                    edit_addr = st.text_input("住所", value=str(row.get("住所", "")), key=f"edit_addr_{i}")
+                    # 住所は任意入力（空でもOK）
+                    edit_addr = st.text_input("住所（任意）", value=addr, key=f"edit_addr_{i}")
                     save_btn = st.form_submit_button("💾 この顧客を保存", use_container_width=True)
 
                 if save_btn:
@@ -750,27 +754,32 @@ with tab7:
                         spreadsheet = client.open_by_url(SPREADSHEET_URL)
                         sheet = spreadsheet.worksheet(mgmt_area)
 
-                        # 全データを取得して顧客コードで行番号を特定
+                        # 全データを取得して顧客コードと名前の両方で行番号を特定
                         all_values = sheet.get_all_values()
                         headers = all_values[0] if all_values else []
-                        code_col = headers.index("顧客コード") if "顧客コード" in headers else 0
-                        name_col = headers.index("名前")      if "名前"      in headers else 1
-                        addr_col = headers.index("住所")      if "住所"      in headers else 2
+                        code_col = headers.index("顧客コード") if "顧客コード" in headers else None
+                        name_col = headers.index("名前")      if "名前"      in headers else None
+                        addr_col = headers.index("住所")      if "住所"      in headers else None
 
                         target_row = None
                         for row_idx, row_vals in enumerate(all_values[1:], start=2):
-                            if len(row_vals) > code_col and str(row_vals[code_col]).strip() == code:
+                            row_code = str(row_vals[code_col]).strip() if code_col is not None and code_col < len(row_vals) else ""
+                            row_name = str(row_vals[name_col]).strip() if name_col is not None and name_col < len(row_vals) else ""
+                            # 顧客コードと名前の両方で照合（より確実に特定）
+                            if row_code == code and row_name == name:
                                 target_row = row_idx
                                 break
 
                         if target_row:
-                            sheet.update_cell(target_row, name_col + 1, edit_name)
-                            sheet.update_cell(target_row, addr_col + 1, edit_addr)
+                            if name_col is not None:
+                                sheet.update_cell(target_row, name_col + 1, edit_name)
+                            if addr_col is not None:
+                                sheet.update_cell(target_row, addr_col + 1, edit_addr)
                             st.success(f"✅ {edit_name} の情報を更新しました！")
                             st.cache_data.clear()
                             st.rerun()
                         else:
-                            st.error("❌ 顧客コードがシートで見つかりませんでした")
+                            st.error("❌ 該当する顧客がシートで見つかりませんでした")
 
                     except Exception as e:
                         st.error(f"❌ 更新エラー：{e}")
