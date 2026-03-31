@@ -214,7 +214,8 @@ with tab3:
 # ── 今日の配送リスト ──────────────────────────────────────────
 with tab4:
     st.subheader("📋 今日の配送リスト")
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today_str    = datetime.date.today().strftime("%Y-%m-%d")
+    _t4_month    = datetime.date.today().strftime("%Y-%m")
     st.caption(f"📅 配送日：{today_str}")
 
     area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="delivery_area")
@@ -223,15 +224,87 @@ with tab4:
     if not area_data:
         st.warning("このエリアに顧客データがありません")
     else:
-        st.info(f"📦 {len(area_data)} 件の顧客が見つかりました")
+        # ── 今月の訪問状況を配送記録から取得 ──────────────────
+        _t4_all = load_delivery_records()
 
+        # 今月1度でも訪問済み（✓）の顧客コードセット
+        _t4_visited = {
+            str(r.get("顧客コード", "")).strip()
+            for r in _t4_all
+            if str(r.get("日付", "")).strip().startswith(_t4_month)
+            and str(r.get("訪問済み", "")).strip() == "✓"
+        }
+
+        # 各顧客の最終補給情報（code → (date_str, supply)）
+        _t4_last: dict = {}
+        for _r in _t4_all:
+            _c = str(_r.get("顧客コード", "")).strip()
+            try:
+                _s = float(_r.get("補給量(L)", 0) or 0)
+            except (ValueError, TypeError):
+                _s = 0.0
+            if _c and _s > 0:
+                _d = str(_r.get("日付", ""))
+                if _c not in _t4_last or _d > _t4_last[_c][0]:
+                    _t4_last[_c] = (_d, _s)
+
+        # ── エリアサマリー ─────────────────────────────────────
+        _t4_v_cnt = sum(
+            1 for r in area_data
+            if str(r.get("顧客コード", "")).strip() in _t4_visited
+        )
+        _t4_u_cnt = len(area_data) - _t4_v_cnt
+
+        _sc1, _sc2, _sc3 = st.columns(3)
+        _sc1.info(f"📦 {len(area_data)} 件")
+        _sc2.success(f"✅ 今月訪問済み：{_t4_v_cnt} 件")
+        if _t4_u_cnt > 0:
+            _sc3.warning(f"⚠️ 今月未訪問：{_t4_u_cnt} 件")
+        else:
+            _sc3.success(f"✅ 今月未訪問：0 件")
+
+        # ── 入力フォーム ───────────────────────────────────────
         with st.form("delivery_form"):
             records = []
             for i, row in enumerate(area_data):
+                code       = str(row.get("顧客コード", "")).strip()
+                name       = row.get("名前", "---")
+                is_visited = code in _t4_visited
+                is_rental  = code.upper().endswith("R")
+
+                # 訪問状態バッジ（HTML）
+                if is_visited:
+                    badge = (
+                        "<span style='background:#d4edda;color:#155724;"
+                        "border-radius:4px;padding:2px 8px;"
+                        "font-size:0.82em;font-weight:bold;'>"
+                        "✅ 今月訪問済み</span>"
+                    )
+                else:
+                    badge = (
+                        "<span style='background:#fff3cd;color:#856404;"
+                        "border-radius:4px;padding:2px 8px;"
+                        "font-size:0.82em;font-weight:bold;'>"
+                        "⚠️ 今月未訪問</span>"
+                    )
+
+                rental_mark = "　🔴" if is_rental else ""
                 st.markdown(
-                    f"**{row.get('名前', '---')}**　｜　"
-                    f"顧客コード: `{row.get('顧客コード', '---')}`"
+                    f"**{name}{rental_mark}**　`{code}`　{badge}",
+                    unsafe_allow_html=True,
                 )
+
+                # 最終補給情報（小さく）
+                if code in _t4_last:
+                    _ld, _ls = _t4_last[code]
+                    try:
+                        _ldt  = datetime.date.fromisoformat(_ld)
+                        _ldjp = f"{_ldt.year}年{_ldt.month}月{_ldt.day}日"
+                        _days = (datetime.date.today() - _ldt).days
+                        st.caption(f"🗓️ 最終補給：{_ldjp}（{_days}日前）　{_ls:.2f} L")
+                    except ValueError:
+                        st.caption(f"🗓️ 最終補給：{_ld}　{_ls:.2f} L")
+
                 st.caption(f"📍 {row.get('住所', '---')}")
 
                 col1, col2, col3, col4 = st.columns(4)
@@ -253,14 +326,14 @@ with tab4:
                 st.markdown("---")
 
                 records.append({
-                    "日付":           today_str,
-                    "エリア":         area,
-                    "顧客コード":     str(row.get("顧客コード", "")),
-                    "名前":           str(row.get("名前", "")),
-                    "住所":           str(row.get("住所", "")),
-                    "訪問済み":       visited,
-                    "補給量(L)":      supply,
-                    "不在":           absent,
+                    "日付":            today_str,
+                    "エリア":          area,
+                    "顧客コード":      code,
+                    "名前":            str(row.get("名前", "")),
+                    "住所":            str(row.get("住所", "")),
+                    "訪問済み":        visited,
+                    "補給量(L)":       supply,
+                    "不在":            absent,
                     "レンタル伝票投函": rental,
                 })
 
@@ -281,7 +354,6 @@ with tab4:
                     record_sheet = spreadsheet.add_worksheet(
                         title="配送記録", rows=1000, cols=10
                     )
-                    # ヘッダー行を追加
                     record_sheet.append_row([
                         "日付", "エリア", "顧客コード", "名前", "住所",
                         "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
@@ -304,6 +376,7 @@ with tab4:
 
                 record_sheet.append_rows(rows_to_append)
                 st.success(f"✅ {len(records)} 件の配送記録をスプレッドシートに保存しました！")
+                load_delivery_records.clear()   # キャッシュをリフレッシュ
 
             except Exception as e:
                 st.error(f"❌ 保存エラー：{e}")
