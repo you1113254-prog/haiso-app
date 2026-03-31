@@ -607,10 +607,19 @@ with tab8:
 
     if st.button("📊 日報を表示", use_container_width=True, key="show_nippo"):
         try:
-            day_records = [
-                r for r in load_delivery_records()
-                if str(r.get("日付", "")).strip() == nippo_date_str
-            ]
+            # 訪問済み or 補給量>0 かつ 不在でない行だけ抽出
+            day_records = []
+            for _r in load_delivery_records():
+                if str(_r.get("日付", "")).strip() != nippo_date_str:
+                    continue
+                if str(_r.get("不在", "")).strip() == "✓":
+                    continue
+                try:
+                    _sp = float(_r.get("補給量(L)", 0) or 0)
+                except (ValueError, TypeError):
+                    _sp = 0.0
+                if str(_r.get("訪問済み", "")).strip() == "✓" or _sp > 0:
+                    day_records.append(_r)
 
             if not day_records:
                 st.info(f"📭 {nippo_date_jp} の配送記録はありません")
@@ -633,11 +642,9 @@ with tab8:
                     sp_str   = f"{sp:.2f}" if sp > 0 else "―"
                     rental   = "✓" if str(r.get("レンタル伝票投函", "")).strip() == "✓" else ""
                     time_str = str(r.get("時間", "")).strip()
-                    absent   = "不在" if str(r.get("不在", "")).strip() == "✓" else ""
-                    row_bg   = "#fff8f0" if absent else "white"
 
                     rows_html += f"""
-                    <tr style="background:{row_bg};">
+                    <tr style="background:white;">
                       <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{idx}</td>
                       <td style="padding:7px 10px;border:1px solid #ccc;">{r.get('顧客コード','')}</td>
                       <td style="padding:7px 10px;border:1px solid #ccc;font-weight:bold;">{r.get('名前','')}</td>
