@@ -58,7 +58,7 @@ def load_delivery_records():
     except Exception:
         return []
 
-st.set_page_config(page_title="灯油配送アプリ", page_icon="🛢️", layout="centered")
+st.set_page_config(page_title="灯油配送アプリ", page_icon="⛽", layout="centered")
 
 # ── パスワード認証 ────────────────────────────────────────────
 PASSWORD = "haiso2026"
@@ -67,7 +67,7 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🛢️ 灯油配送アプリ")
+    st.title("⛽ 灯油配送アプリ")
     st.markdown("---")
     st.subheader("🔒 ログイン")
     with st.form("login_form"):
@@ -83,13 +83,13 @@ if not st.session_state.authenticated:
 
 # ログアウトボタン（サイドバー）
 with st.sidebar:
-    st.write("🛢️ 灯油配送アプリ")
+    st.write("⛽ 灯油配送アプリ")
     if st.button("🔓 ログアウト", use_container_width=True):
         st.session_state.authenticated = False
         st.rerun()
 
 # ── メインアプリ ──────────────────────────────────────────────
-st.title("🛢️ 灯油配送アプリ")
+st.title("⛽ 灯油配送アプリ")
 st.write("名前・顧客コード・住所の一部を入れて検索できます。")
 
 try:
@@ -146,7 +146,7 @@ def show_results(results):
                 st.write(f"🗓️ **最終補給日：** {_date_jp}（{_days_ago}日前）")
             except ValueError:
                 st.write(f"🗓️ **最終補給日：** {_last_date_str}")
-            st.write(f"🛢️ **最終補給量：** {_last_supply:.2f} L")
+            st.write(f"⛽ **最終補給量：** {_last_supply:.2f} L")
         else:
             st.caption("📭 補給記録なし")
 
@@ -865,7 +865,7 @@ with tab8:
                 nippo_html = f"""
                 <div id="nippo-print-area" style="font-family:'Hiragino Sans','Meiryo',sans-serif;max-width:800px;margin:0 auto;padding:20px;">
                   <h2 style="text-align:center;border-bottom:3px solid #1f77b4;padding-bottom:10px;color:#1f77b4;">
-                    🛢️ 灯油配送　日報
+                    ⛽ 灯油配送　日報
                   </h2>
                   <p style="text-align:right;font-size:16px;margin-bottom:16px;">
                     <strong>配送日：{nippo_date_jp}</strong>
