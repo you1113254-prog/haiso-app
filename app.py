@@ -828,7 +828,7 @@ with tab8:
                     _sp = float(_r.get("補給量(L)", 0) or 0)
                 except (ValueError, TypeError):
                     _sp = 0.0
-                if str(_r.get("訪問済み", "")).strip() == "✓" or _sp > 0:
+                if _sp > 0 or str(_r.get("レンタル伝票投函", "")).strip() == "✓":
                     day_records.append(_r)
 
             if not day_records:
