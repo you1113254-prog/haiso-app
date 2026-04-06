@@ -100,10 +100,10 @@ except Exception as e:
     st.error(f"❌ 読み込みエラー：{e}")
     st.stop()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索",
     "📋 今日の配送リスト", "📝 配送記録入力",
-    "⚠️ アラート", "👤 顧客管理", "📊 日報",
+    "⚠️ アラート", "👤 顧客管理", "📊 日報", "🤖 AIアシスタント",
 ])
 
 def show_results(results):
@@ -924,3 +924,103 @@ with tab8:
 
         except Exception as e:
             st.error(f"❌ 読み込みエラー：{e}")
+
+# ── AIアシスタント ────────────────────────────────────────────
+with tab9:
+    st.subheader("🤖 AIアシスタント")
+    st.caption("配送に関する質問は何でも聞いてください")
+
+    import anthropic as _anthropic
+    import os as _os
+    from collections import defaultdict as _defaultdict
+
+    def build_ai_context(all_data, delivery_records):
+        area_counts = _defaultdict(int)
+        for c in all_data:
+            area_counts[c.get("エリア", "不明")] += 1
+
+        import datetime as _dt
+        _month = _dt.date.today().strftime("%Y-%m")
+        month_records = [r for r in delivery_records if str(r.get("日付","")).startswith(_month)]
+        visited_codes = {str(r.get("顧客コード","")).strip() for r in month_records if str(r.get("訪問済み","")).strip() == "✓"}
+
+        lines = [f"【お客様データ：全{len(all_data)}件】", ""]
+        lines.append("■ エリア別件数")
+        for area, count in area_counts.items():
+            lines.append(f"  {area}：{count}件")
+        lines.append("")
+        lines.append(f"■ 今月（{_month}）の配送状況")
+        lines.append(f"  訪問済み：{len(visited_codes)}件")
+        lines.append(f"  未訪問：{len(all_data) - len(visited_codes)}件")
+        lines.append("")
+        lines.append("■ お客様一覧（顧客コード・名前・住所・エリア）")
+        for c in all_data:
+            code = c.get("顧客コード", "")
+            name = c.get("名前", "")
+            addr = c.get("住所", "")
+            area = c.get("エリア", "")
+            if name or addr:
+                lines.append(f"  [{code}] {name} / {addr} / {area}")
+        return "\n".join(lines)
+
+    def build_ai_system_prompt(context):
+        return f"""あなたはゆういちさんの灯油配送業務を助けるAIアシスタントです。
+以下の業務知識とお客様データをもとに質問に答えてください。
+回答は短く・わかりやすく・箇条書きで答えてください。
+
+【基本情報】
+- 担当エリア：沖縄県
+- 訪問頻度：月1回
+- 一人で全件まわっている
+
+【燃料残量の目安】
+- 残量20%以下：至急訪問
+- 残量20〜40%：今月中に訪問
+- 残量40%以上：来月でOK
+
+{context}"""
+
+    col1, col2 = st.columns(2)
+    ai_shortcut = None
+    with col1:
+        if st.button("📊 今月の状況", key="ai_month"):
+            ai_shortcut = "今月の配送状況を教えてください"
+    with col2:
+        if st.button("📍 エリア件数", key="ai_area"):
+            ai_shortcut = "エリアごとの件数を教えてください"
+
+    if "ai_messages" not in st.session_state:
+        st.session_state.ai_messages = []
+
+    if ai_shortcut:
+        st.session_state.ai_messages.append({"role": "user", "content": ai_shortcut})
+
+    for message in st.session_state.ai_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("AIに質問する...", key="ai_chat_input"):
+        st.session_state.ai_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+    if st.session_state.ai_messages and st.session_state.ai_messages[-1]["role"] == "user":
+        with st.chat_message("assistant"):
+            with st.spinner("考え中..."):
+                api_key = st.secrets.get("ANTHROPIC_API_KEY", _os.getenv("ANTHROPIC_API_KEY"))
+                ai_client = _anthropic.Anthropic(api_key=api_key)
+                delivery_records = load_delivery_records()
+                context = build_ai_context(data, delivery_records)
+                response = ai_client.messages.create(
+                    model="claude-opus-4-5",
+                    max_tokens=1024,
+                    system=build_ai_system_prompt(context),
+                    messages=st.session_state.ai_messages
+                )
+                reply = response.content[0].text
+                st.markdown(reply)
+                st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+
+    if st.button("🔄 会話リセット", key="ai_reset"):
+        st.session_state.ai_messages = []
+        st.rerun()
