@@ -366,8 +366,7 @@ with tab4:
 
                 # 全顧客分をまとめて追記
                 rows_to_append = []
-                for rec in records:for rec in records:
-                    rows_to_append.append([
+                for rec in records:
                     rows_to_append.append([
                         rec["日付"],
                         rec["エリア"],
