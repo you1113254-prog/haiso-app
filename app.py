@@ -45,7 +45,7 @@ def load_all_data():
                 row["エリア"] = sheet_name
                 all_data.append(row)
         except Exception as e:
-            st.warning(f"⚠️ {sheet_name} スキップ：{e}")
+            st.warning(f"⚠️ {} スキップ：{e}")
     return all_data
 
 @st.cache_data(ttl=300)
@@ -893,7 +893,7 @@ with tab8:
                   </table>
                   <p style="margin-top:16px;font-size:15px;">
                     件数：<strong>{len(day_records)} 件</strong>
-                    合計補給量：<strong>{total_supply:.2f} L</strong>
+                    合計補給量：<strong>{total_supply:.2f} L</strong>　｜　レンタル伝票：<strong>{sum(1 for r in day_records if str(r.get("レンタル伝票投函", "")).strip() == "✓")} 件</strong>
                   </p>
                 </div>"""
 
