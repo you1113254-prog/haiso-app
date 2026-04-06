@@ -964,6 +964,8 @@ with tab9:
         return "\n".join(lines)
 
     def build_ai_system_prompt(context):
+        import datetime as _dt2
+        today = _dt2.date.today().strftime("%Y-%m-%d")
         return f"""あなたはゆういちさんの灯油配送業務を助けるAIアシスタントです。
 以下の業務知識とお客様データをもとに質問に答えてください。
 回答は短く・わかりやすく・箇条書きで答えてください。
@@ -977,6 +979,27 @@ with tab9:
 - 残量20%以下：至急訪問
 - 残量20〜40%：今月中に訪問
 - 残量40%以上：来月でOK
+
+【配送記録の書き込み機能】
+ユーザーが配送内容を入力した場合（例：田中さん36L、101739 36L、スモール農園300L不在など）：
+1. お客様データから該当顧客を検索して特定する
+2. 以下のJSON形式を必ず含めて返す：
+```json
+{{{{
+  "action": "save_delivery",
+  "顧客コード": "顧客コードをここに",
+  "名前": "お客様名をここに",
+  "住所": "住所をここに",
+  "エリア": "エリア名をここに",
+  "補給量": 0,
+  "不在": false,
+  "伝票投函": false,
+  "日付": "{today}"
+}}}}
+```
+
+3. JSONの後に「上記の内容でスプレッドシートに保存しますか？」と必ず聞く
+4. はい・OK・保存などと答えた場合のみ保存する
 
 {context}"""
 
@@ -1005,24 +1028,84 @@ with tab9:
             st.markdown(prompt)
 
     if st.session_state.ai_messages and st.session_state.ai_messages[-1]["role"] == "user":
-        with st.chat_message("assistant"):
-            with st.spinner("考え中..."):
-                try:
-                    api_key = st.secrets["ANTHROPIC_API_KEY"]
-                except:
-                    api_key = _os.getenv("ANTHROPIC_API_KEY")
-                ai_client = _anthropic.Anthropic(api_key=api_key)
-                delivery_records = load_delivery_records()
-                context = build_ai_context(data, delivery_records)
-                response = ai_client.messages.create(
-                    model="claude-opus-4-5",
-                    max_tokens=1024,
-                    system=build_ai_system_prompt(context),
-                    messages=st.session_state.ai_messages
-                )
-                reply = response.content[0].text
-                st.markdown(reply)
-                st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+        last_user_msg = st.session_state.ai_messages[-1]["content"]
+
+        # 「はい」系の返答かつ直前のAIメッセージにJSONがある場合→保存処理
+        yes_words = ["はい", "yes", "ok", "OK", "保存", "お願い", "いいです", "よろしく"]
+        is_yes = any(w in last_user_msg for w in yes_words)
+
+        pending_json = st.session_state.get("pending_delivery", None)
+
+        if is_yes and pending_json:
+            with st.chat_message("assistant"):
+                with st.spinner("スプレッドシートに保存中..."):
+                    try:
+                        import datetime as _dt3
+                        _save_client = connect_sheets()
+                        _save_spreadsheet = _save_client.open_by_url(SPREADSHEET_URL)
+                        try:
+                            record_sheet = _save_spreadsheet.worksheet("配送記録")
+                        except Exception:
+                            record_sheet = _save_spreadsheet.add_worksheet(title="配送記録", rows=1000, cols=10)
+                            record_sheet.append_row(["日付","エリア","顧客コード","名前","住所","訪問済み","補給量(L)","不在","レンタル伝票投函"])
+
+                        today_str = _dt3.date.today().strftime("%Y-%m-%d")
+                        supply = float(pending_json.get("補給量", 0) or 0)
+                        absent = pending_json.get("不在", False)
+                        rental = pending_json.get("伝票投函", False)
+
+                        row = [
+                            today_str,
+                            pending_json.get("エリア", ""),
+                            pending_json.get("顧客コード", ""),
+                            pending_json.get("名前", ""),
+                            pending_json.get("住所", ""),
+                            "✓" if not absent else "",
+                            supply if supply > 0 else "",
+                            "✓" if absent else "",
+                            "✓" if rental else "",
+                        ]
+                        record_sheet.append_row(row)
+                        load_delivery_records.clear()
+                        st.session_state.pending_delivery = None
+
+                        reply = f"✅ **保存しました！**\n\n{pending_json.get('名前','')}さんの配送記録をスプレッドシートに記録しました。"
+                        st.markdown(reply)
+                        st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+                    except Exception as e:
+                        reply = f"❌ 保存エラー：{e}"
+                        st.markdown(reply)
+                        st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+        else:
+            with st.chat_message("assistant"):
+                with st.spinner("考え中..."):
+                    try:
+                        api_key = st.secrets["ANTHROPIC_API_KEY"]
+                    except:
+                        api_key = _os.getenv("ANTHROPIC_API_KEY")
+                    ai_client = _anthropic.Anthropic(api_key=api_key)
+                    delivery_records = load_delivery_records()
+                    context = build_ai_context(data, delivery_records)
+                    response = ai_client.messages.create(
+                        model="claude-opus-4-5",
+                        max_tokens=1024,
+                        system=build_ai_system_prompt(context),
+                        messages=st.session_state.ai_messages
+                    )
+                    reply = response.content[0].text
+                    st.markdown(reply)
+                    st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+
+                    # JSONが含まれている場合はpending_deliveryに保存
+                    import json as _json
+                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', reply, re.DOTALL)
+                    if json_match:
+                        try:
+                            parsed = _json.loads(json_match.group(1))
+                            if parsed.get("action") == "save_delivery":
+                                st.session_state.pending_delivery = parsed
+                        except Exception:
+                            pass
 
     if st.button("🔄 会話リセット", key="ai_reset"):
         st.session_state.ai_messages = []
