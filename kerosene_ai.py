@@ -1,17 +1,13 @@
-from dotenv import load_dotenv
-load_dotenv("/Users/youichi/Desktop/MYAI/.env")
-
 import streamlit as st
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 import re
+import os
+from dotenv import load_dotenv
 
-st.set_page_config(
-    page_title="灯油配送アシスタント",
-    page_icon="🛢️",
-    layout="centered"
-)
+# ローカル環境では.envを読む
+load_dotenv("/Users/youichi/Desktop/MYAI/.env")
 
 TARGET_SHEETS = [
     "宜野座", "金武", "金武2", "金武3",
@@ -22,16 +18,32 @@ TARGET_SHEETS = [
     "宇茂佐、屋部、為又", "辺野古、大浦",
 ]
 
+st.set_page_config(
+    page_title="灯油配送アシスタント",
+    page_icon="🛢️",
+    layout="centered"
+)
+
 @st.cache_resource
 def get_spreadsheet():
-    scopes = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = Credentials.from_service_account_file(
-        "/Users/youichi/Desktop/配送AI/credentials.json",
-        scopes=scopes
-    )
+    # Streamlit Cloud環境
+    if "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=[
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+    # ローカル環境
+    else:
+        creds = Credentials.from_service_account_file(
+            "/Users/youichi/Desktop/配送AI/credentials.json",
+            scopes=[
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
     client = gspread.authorize(creds)
     return client.open_by_key("1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM")
 
@@ -165,7 +177,9 @@ if prompt := st.chat_input("質問を入力してください..."):
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
     with st.chat_message("assistant"):
         with st.spinner("考え中..."):
-            client = anthropic.Anthropic()
+            # APIキーの取得（Cloud優先、次にローカル）
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY"))
+            client = anthropic.Anthropic(api_key=api_key)
             customer_context = build_customer_context(customers)
             response = client.messages.create(
                 model="claude-opus-4-5",
