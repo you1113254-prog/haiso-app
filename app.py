@@ -1007,7 +1007,10 @@ with tab9:
     if st.session_state.ai_messages and st.session_state.ai_messages[-1]["role"] == "user":
         with st.chat_message("assistant"):
             with st.spinner("考え中..."):
-                api_key = st.secrets.get("ANTHROPIC_API_KEY", _os.getenv("ANTHROPIC_API_KEY"))
+                try:
+                    api_key = st.secrets["ANTHROPIC_API_KEY"]
+                except:
+                    api_key = _os.getenv("ANTHROPIC_API_KEY")
                 ai_client = _anthropic.Anthropic(api_key=api_key)
                 delivery_records = load_delivery_records()
                 context = build_ai_context(data, delivery_records)
