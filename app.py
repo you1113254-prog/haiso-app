@@ -367,6 +367,8 @@ with tab4:
                 # 全顧客分をまとめて追記
                 rows_to_append = []
                 for rec in records:
+                    if not (rec["訪問済み"] or rec["補給量(L)"] > 0 or rec["不在"] or rec["レンタル伝票投函"]):
+                        continue
                     rows_to_append.append([
                         rec["日付"],
                         rec["エリア"],
@@ -468,6 +470,8 @@ with tab5:
                 # 全顧客分をまとめて追記
                 rows_to_append = []
                 for rec in record_entries:
+                    if not (rec["訪問済み"] or rec["補給量(L)"] > 0 or rec["不在"] or rec["レンタル伝票投函"]):
+                        continue
                     rows_to_append.append([
                         rec["日付"],
                         rec["エリア"],
