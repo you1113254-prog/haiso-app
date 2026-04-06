@@ -45,7 +45,7 @@ def load_all_data():
                 row["エリア"] = sheet_name
                 all_data.append(row)
         except Exception as e:
-            st.warning(f"⚠️ {} スキップ：{e}")
+            st.warning(f"⚠️ {sheet_name} スキップ：{e}")
     return all_data
 
 @st.cache_data(ttl=300)
