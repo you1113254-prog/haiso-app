@@ -1098,7 +1098,8 @@ with tab9:
 
                     # JSONが含まれている場合はpending_deliveryに保存
                     import json as _json
-                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', reply, re.DOTALL)
+                    import re as _re
+                    json_match = _re.search(r'```json\s*(\{.*?\})\s*```', reply, re.DOTALL)
                     if json_match:
                         try:
                             parsed = _json.loads(json_match.group(1))
