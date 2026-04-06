@@ -5,17 +5,28 @@ from google.oauth2.service_account import Credentials
 import re
 import os
 from dotenv import load_dotenv
+from collections import defaultdict
 
-# ローカル環境では.envを読む
 load_dotenv("/Users/youichi/Desktop/MYAI/.env")
 
+# 新しいスプレッドシートID
+SPREADSHEET_ID = "1gX2Iyg7bODxuKZI1ENwMbmmPzTW7KjaWNwjxAQnaWM4"
+
+# 読み込むシート（配送記録・現金フリーは除外）
 TARGET_SHEETS = [
-    "宜野座", "金武", "金武2", "金武3",
-    "石川1", "石川2", "石川3", "石川4",
-    "読谷", "うるま", "本部、今帰仁", "勝連",
-    "沖縄市", "恩納村", "名護",
-    "国頭、東、大宜味", "屋我地、真喜屋、伊差川",
-    "宇茂佐、屋部、為又", "辺野古、大浦",
+    "ぎのざきん",
+    "いしかわ",
+    "よみたん",
+    "うるま",
+    "もとぶなきじん",
+    "かつれん",
+    "おきなわし",
+    "おんなそん",
+    "なご",
+    "くにがみひがしおおぎみ",
+    "やがじまきやいさがわ",
+    "うむさやぶびいまた",
+    "へのこおおうら",
 ]
 
 st.set_page_config(
@@ -26,7 +37,6 @@ st.set_page_config(
 
 @st.cache_resource
 def get_spreadsheet():
-    # Streamlit Cloud環境
     if "gcp_service_account" in st.secrets:
         creds = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
@@ -35,7 +45,6 @@ def get_spreadsheet():
                 "https://www.googleapis.com/auth/drive"
             ]
         )
-    # ローカル環境
     else:
         creds = Credentials.from_service_account_file(
             "/Users/youichi/Desktop/配送AI/credentials.json",
@@ -45,7 +54,7 @@ def get_spreadsheet():
             ]
         )
     client = gspread.authorize(creds)
-    return client.open_by_key("1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM")
+    return client.open_by_key(SPREADSHEET_ID)
 
 def is_valid_customer_code(code):
     code = str(code).strip()
@@ -94,12 +103,38 @@ def get_all_customers():
 def build_customer_context(customers):
     if not customers:
         return "（お客様データを読み込めませんでした）"
+
+    area_counts = defaultdict(int)
+    for c in customers:
+        area_counts[c.get("エリア", "不明")] += 1
+
     lines = [f"【お客様データ：全{len(customers)}件】"]
-    for c in customers[:50]:
-        line = " | ".join([f"{k}:{v}" for k, v in c.items() if v])
-        lines.append(line)
-    if len(customers) > 50:
-        lines.append(f"（※表示は50件まで。全{len(customers)}件あります）")
+    lines.append("")
+    lines.append("■ エリア別件数")
+    for area in TARGET_SHEETS:
+        if area in area_counts:
+            lines.append(f"  {area}：{area_counts[area]}件")
+    lines.append(f"  合計：{len(customers)}件")
+    lines.append("")
+
+    lines.append("■ お客様一覧（名前・住所・エリア）")
+    name_col = None
+    addr_col = None
+    for c in customers[:1]:
+        for k in c.keys():
+            if "名前" in str(k) or "氏名" in str(k):
+                name_col = k
+            if "住所" in str(k):
+                addr_col = k
+
+    for c in customers:
+        name = c.get(name_col, "") if name_col else ""
+        addr = c.get(addr_col, "") if addr_col else ""
+        area = c.get("エリア", "")
+        code = c.get("顧客コード", "")
+        if name or addr:
+            lines.append(f"  [{code}] {name} / {addr} / {area}")
+
     return "\n".join(lines)
 
 def build_system_prompt(customer_context):
@@ -119,10 +154,10 @@ def build_system_prompt(customer_context):
 - 配送最低量：18リットル（1缶）
 
 【地区ごとの特徴】
-- うるま市：件数が多い。市街地と農村が混在
-- 読谷村：道が細い場所あり
-- 名護市：距離が遠い。まとめてまわる
-- 恩納村：リゾート地帯
+- うるま：件数が多い。市街地と農村が混在
+- よみたん：道が細い場所あり
+- なご：距離が遠い。まとめてまわる
+- おんなそん：リゾート地帯
 
 【繁忙期パターン】
 - 12月〜2月：最繁忙期
@@ -177,7 +212,6 @@ if prompt := st.chat_input("質問を入力してください..."):
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
     with st.chat_message("assistant"):
         with st.spinner("考え中..."):
-            # APIキーの取得（Cloud優先、次にローカル）
             api_key = st.secrets.get("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY"))
             client = anthropic.Anthropic(api_key=api_key)
             customer_context = build_customer_context(customers)
