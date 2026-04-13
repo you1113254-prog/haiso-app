@@ -1087,7 +1087,7 @@ with tab9:
                     delivery_records = load_delivery_records()
                     context = build_ai_context(data, delivery_records)
                     response = ai_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                        model="claude-haiku-4-5",
                         max_tokens=1024,
                         system=build_ai_system_prompt(context),
                         messages=st.session_state.ai_messages
