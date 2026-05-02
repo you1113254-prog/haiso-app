@@ -79,8 +79,34 @@ def get_or_create_sheet(sheet_name, headers):
         return spreadsheet.worksheet(sheet_name)
     except Exception:
         sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
-        sheet.append_row(headers)
+        # append_row を使わず、A1 から確実にヘッダーを書き込む
+        end_col_letter = chr(ord('A') + len(headers) - 1)
+        sheet.update(values=[headers], range_name=f"A1:{end_col_letter}1")
         return sheet
+
+def safe_append_rows(sheet, rows, num_cols):
+    """append_rows のバグ（変な列にズレる）を回避する超安全な追記関数。
+    各セルを (row, col) で明示指定して update_cells で書き込む。
+    range_name 解釈の揺れに依存しないため、列ズレが起きない。"""
+    if not rows:
+        return
+    # A〜num_cols列のうち、どこかにデータがある最終行を探す
+    end_col_letter = chr(ord('A') + num_cols - 1)
+    existing = sheet.get(f"A1:{end_col_letter}")  # ヘッダー含む全範囲
+    last_used_row = 0
+    for idx, r in enumerate(existing or []):
+        if any(str(c).strip() for c in r):
+            last_used_row = idx + 1   # 1始まり
+    next_row = max(last_used_row + 1, 2)  # ヘッダー行を上書きしないよう最低2
+
+    cells = []
+    for r_off, row in enumerate(rows):
+        # 念のため num_cols に揃える
+        padded = list(row) + [""] * (num_cols - len(row))
+        padded = padded[:num_cols]
+        for c_off, val in enumerate(padded):
+            cells.append(gspread.Cell(row=next_row + r_off, col=c_off + 1, value=val))
+    sheet.update_cells(cells, value_input_option="USER_ENTERED")
 
 st.set_page_config(page_title="灯油配送アプリ", page_icon="⛽", layout="centered")
 
@@ -373,20 +399,11 @@ with tab4:
 
         if submitted:
             try:
-                client = connect_sheets()
-                spreadsheet = client.open_by_url(SPREADSHEET_URL)
-
-                # 「配送記録」シートを取得。なければ新規作成
-                try:
-                    record_sheet = spreadsheet.worksheet("配送記録")
-                except Exception:
-                    record_sheet = spreadsheet.add_worksheet(
-                        title="配送記録", rows=1000, cols=10
-                    )
-                    record_sheet.append_row([
-                        "日付", "エリア", "顧客コード", "名前", "住所",
-                        "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
-                    ])
+                # ✅ 共通ヘルパーで安全にシート取得
+                record_sheet = get_or_create_sheet("配送記録", [
+                    "日付", "エリア", "顧客コード", "名前", "住所",
+                    "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
+                ])
 
                 # 全顧客分をまとめて追記
                 rows_to_append = []
@@ -403,7 +420,8 @@ with tab4:
                         "✓" if rec["レンタル伝票投函"] else "",
                     ])
 
-                record_sheet.append_rows(rows_to_append)
+                # ✅ append_rows のズレバグを回避する安全な書き込み方式
+                safe_append_rows(record_sheet, rows_to_append, num_cols=9)
                 st.success(f"✅ {len(records)} 件の配送記録をスプレッドシートに保存しました！")
                 load_delivery_records.clear()   # キャッシュをリフレッシュ
 
@@ -478,16 +496,10 @@ with tab5:
                 spreadsheet = client.open_by_url(SPREADSHEET_URL)
 
                 # 「配送記録」シートを取得。なければ新規作成
-                try:
-                    record_sheet = spreadsheet.worksheet("配送記録")
-                except Exception:
-                    record_sheet = spreadsheet.add_worksheet(
-                        title="配送記録", rows=1000, cols=10
-                    )
-                    record_sheet.append_row([
-                        "日付", "エリア", "顧客コード", "名前", "住所",
-                        "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
-                    ])
+                record_sheet = get_or_create_sheet("配送記録", [
+                    "日付", "エリア", "顧客コード", "名前", "住所",
+                    "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
+                ])
 
                 # 全顧客分をまとめて追記
                 rows_to_append = []
@@ -504,7 +516,9 @@ with tab5:
                         "✓" if rec["レンタル伝票投函"] else "",
                     ])
 
-                record_sheet.append_rows(rows_to_append)
+                # ✅ append_rows のズレバグを回避する安全な書き込み方式
+                safe_append_rows(record_sheet, rows_to_append, num_cols=9)
+                load_delivery_records.clear()
                 st.success(f"✅ {len(record_entries)} 件の配送記録をスプレッドシートに保存しました！")
 
             except Exception as e:
@@ -839,9 +853,29 @@ with tab8:
     nippo_date_str = nippo_date.strftime("%Y-%m-%d")
     nippo_date_jp  = f"{nippo_date.year}年{nippo_date.month}月{nippo_date.day}日"
 
+    _nippo_col1, _nippo_col2 = st.columns([0.7, 0.3])
+    with _nippo_col2:
+        if st.button("🔄 最新を取得", use_container_width=True, key="refresh_nippo_cache",
+                     help="キャッシュをクリアして最新データを取り直します"):
+            load_delivery_records.clear()
+            st.success("✅ キャッシュをクリアしました")
+
+    # 診断モード：その日のシート上の生データをそのまま表示
+    with st.expander("🔧 診断：シートの生データを見る（バグ調査用）"):
+        if st.button("生データを表示", key="show_raw_records"):
+            load_delivery_records.clear()
+            _all = load_delivery_records()
+            st.write(f"全レコード数: {len(_all)}")
+            if _all:
+                st.write(f"検出キー（ヘッダー）: {list(_all[0].keys())}")
+            _hits = [r for r in _all if str(r.get("日付", "")).strip() == nippo_date_str]
+            st.write(f"{nippo_date_str} のレコード数: {len(_hits)}")
+            if _hits:
+                st.dataframe(_hits)
+
     if st.button("📊 日報を表示", use_container_width=True, key="show_nippo"):
         try:
-            # 訪問済み or 補給量>0 かつ 不在でない行だけ抽出
+            # 不在でない行を抽出（訪問・補給・伝票投函のいずれか）
             day_records = []
             for _r in load_delivery_records():
                 if str(_r.get("日付", "")).strip() != nippo_date_str:
@@ -852,7 +886,9 @@ with tab8:
                     _sp = float(_r.get("補給量(L)", 0) or 0)
                 except (ValueError, TypeError):
                     _sp = 0.0
-                if _sp > 0 or str(_r.get("レンタル伝票投函", "")).strip() == "✓":
+                _visited = str(_r.get("訪問済み", "")).strip() == "✓"
+                _rental  = str(_r.get("レンタル伝票投函", "")).strip() == "✓"
+                if _sp > 0 or _rental or _visited:
                     day_records.append(_r)
 
             if not day_records:
@@ -1065,13 +1101,10 @@ with tab9:
                 with st.spinner("スプレッドシートに保存中..."):
                     try:
                         import datetime as _dt3
-                        _save_client = connect_sheets()
-                        _save_spreadsheet = _save_client.open_by_url(SPREADSHEET_URL)
-                        try:
-                            record_sheet = _save_spreadsheet.worksheet("配送記録")
-                        except Exception:
-                            record_sheet = _save_spreadsheet.add_worksheet(title="配送記録", rows=1000, cols=10)
-                            record_sheet.append_row(["日付","エリア","顧客コード","名前","住所","訪問済み","補給量(L)","不在","レンタル伝票投函"])
+                        record_sheet = get_or_create_sheet("配送記録", [
+                            "日付","エリア","顧客コード","名前","住所",
+                            "訪問済み","補給量(L)","不在","レンタル伝票投函"
+                        ])
 
                         today_str = _dt3.date.today().strftime("%Y-%m-%d")
                         supply = float(pending_json.get("補給量", 0) or 0)
@@ -1089,7 +1122,8 @@ with tab9:
                             "✓" if absent else "",
                             "✓" if rental else "",
                         ]
-                        record_sheet.append_row(row)
+                        # ✅ append_row のズレバグを回避する安全な書き込み方式
+                        safe_append_rows(record_sheet, [row], num_cols=9)
                         load_delivery_records.clear()
                         st.session_state.pending_delivery = None
 
@@ -1151,7 +1185,8 @@ with tab10:
             try:
                 sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
                 today = datetime.date.today().strftime("%Y-%m-%d")
-                sheet.append_row([today, new_task.strip(), ""])
+                # ✅ append_row のズレバグを回避する安全な書き込み方式
+                safe_append_rows(sheet, [[today, new_task.strip(), ""]], num_cols=3)
                 load_sheet_data.clear()
                 st.success("✅ タスクを追加しました")
                 st.rerun()
