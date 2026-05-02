@@ -59,6 +59,29 @@ def load_delivery_records():
     except Exception:
         return []
 
+# ── 汎用シート操作（タスク・記憶などで使用） ─────────────────
+@st.cache_data(ttl=60)
+def load_sheet_data(sheet_name):
+    """指定シートの全レコードを取得。シートがなければ空リスト。"""
+    try:
+        client = connect_sheets()
+        spreadsheet = client.open_by_url(SPREADSHEET_URL)
+        sheet = spreadsheet.worksheet(sheet_name)
+        return sheet.get_all_records()
+    except Exception:
+        return []
+
+def get_or_create_sheet(sheet_name, headers):
+    """シートを取得。なければヘッダー付きで作成して返す。"""
+    client = connect_sheets()
+    spreadsheet = client.open_by_url(SPREADSHEET_URL)
+    try:
+        return spreadsheet.worksheet(sheet_name)
+    except Exception:
+        sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+        sheet.append_row(headers)
+        return sheet
+
 st.set_page_config(page_title="灯油配送アプリ", page_icon="⛽", layout="centered")
 
 # ── パスワード認証 ────────────────────────────────────────────
@@ -100,10 +123,11 @@ except Exception as e:
     st.error(f"❌ 読み込みエラー：{e}")
     st.stop()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索",
     "📋 今日の配送リスト", "📝 配送記録入力",
     "⚠️ アラート", "👤 顧客管理", "📊 日報", "🤖 AIアシスタント",
+    "✅ タスク",
 ])
 
 def show_results(results):
@@ -1111,3 +1135,88 @@ with tab9:
     if st.button("🔄 会話リセット", key="ai_reset"):
         st.session_state.ai_messages = []
         st.rerun()
+
+# ── タスク管理 ─────────────────────────────────────────────────
+with tab10:
+    st.subheader("✅ タスク管理")
+    st.caption("やることリストをGoogle Sheetsに保存します")
+
+    TASKS_HEADERS = ["日付", "タスク", "完了"]
+
+    # 新規タスク追加フォーム
+    with st.form("new_task_form", clear_on_submit=True):
+        new_task = st.text_input("新しいタスク", key="new_task_input")
+        add_btn = st.form_submit_button("➕ 追加", use_container_width=True)
+        if add_btn and new_task.strip():
+            try:
+                sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
+                today = datetime.date.today().strftime("%Y-%m-%d")
+                sheet.append_row([today, new_task.strip(), ""])
+                load_sheet_data.clear()
+                st.success("✅ タスクを追加しました")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 追加エラー：{e}")
+
+    st.markdown("---")
+
+    # タスク一覧表示
+    tasks = load_sheet_data("タスク")
+
+    if not tasks:
+        st.info("📭 タスクはまだありません。上のフォームから追加してください。")
+    else:
+        # 未完了を上、完了を下に
+        pending_tasks = [(i, t) for i, t in enumerate(tasks) if str(t.get("完了", "")).strip() != "✓"]
+        done_tasks    = [(i, t) for i, t in enumerate(tasks) if str(t.get("完了", "")).strip() == "✓"]
+
+        st.markdown(f"**📋 未完了：{len(pending_tasks)}件　／　✅ 完了：{len(done_tasks)}件**")
+        st.markdown("---")
+
+        for original_i, task in pending_tasks + done_tasks:
+            row_idx = original_i + 2  # ヘッダー行の次が2行目
+            done_now = str(task.get("完了", "")).strip() == "✓"
+            task_text = task.get("タスク", "")
+            task_date = task.get("日付", "")
+
+            col1, col2, col3 = st.columns([0.1, 0.7, 0.2])
+            with col1:
+                done = st.checkbox(" ", value=done_now, key=f"task_done_{original_i}", label_visibility="collapsed")
+                if done != done_now:
+                    try:
+                        sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
+                        sheet.update_cell(row_idx, 3, "✓" if done else "")
+                        load_sheet_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ 更新エラー：{e}")
+            with col2:
+                if done_now:
+                    st.markdown(f"~~{task_text}~~")
+                else:
+                    st.markdown(f"**{task_text}**")
+                st.caption(f"📅 {task_date}")
+            with col3:
+                if st.button("🗑️ 削除", key=f"task_del_{original_i}"):
+                    try:
+                        sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
+                        sheet.delete_rows(row_idx)
+                        load_sheet_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ 削除エラー：{e}")
+            st.divider()
+
+        # 完了済みを一括削除
+        if done_tasks:
+            if st.button("🧹 完了済みを一括削除", key="clear_done"):
+                try:
+                    sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
+                    # 下から削除（インデックスがズレないように）
+                    for original_i, _ in sorted(done_tasks, reverse=True):
+                        sheet.delete_rows(original_i + 2)
+                    load_sheet_data.clear()
+                    st.success(f"✅ {len(done_tasks)}件の完了済みタスクを削除しました")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 削除エラー：{e}")
