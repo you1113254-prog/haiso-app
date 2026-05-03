@@ -1063,8 +1063,36 @@ with tab9:
 
 {context}"""
 
-    col1, col2 = st.columns(2)
     ai_shortcut = None
+
+    # 🎤 音声入力（ブラウザ標準のSpeech Recognitionを使用、無料・APIキー不要）
+    try:
+        from streamlit_mic_recorder import speech_to_text
+        st.markdown("**🎤 音声で配送内容を入力**")
+        st.caption("ボタンを押して話すだけ。例：「鈴木愛さんに50リットル」「101187 不在」")
+        voice_text = speech_to_text(
+            language="ja-JP",
+            start_prompt="🎤 話す",
+            stop_prompt="⏹ 停止",
+            use_container_width=True,
+            just_once=True,
+            key="ai_voice_input",
+        )
+        if voice_text:
+            # 一度処理したら ai_messages に積むので、同じ文字列が何度も
+            # ai_shortcut として再利用されないよう session_state で重複防止
+            last_voice = st.session_state.get("last_voice_text", "")
+            if voice_text != last_voice:
+                st.session_state.last_voice_text = voice_text
+                ai_shortcut = voice_text
+                st.success(f"🎤 認識：「{voice_text}」")
+    except ImportError:
+        st.caption("⚠️ 音声入力ライブラリがロードされていません（クラウド再デプロイ待ち）")
+    except Exception as _voice_err:
+        st.caption(f"⚠️ 音声入力エラー：{_voice_err}")
+
+    st.markdown("---")
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("📊 今月の状況", key="ai_month"):
             ai_shortcut = "今月の配送状況を教えてください"
