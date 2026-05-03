@@ -3,5 +3,4 @@ google-auth
 streamlit
 anthropic
 python-dotenv
-anthropic
-python-dotenv
+streamlit-mic-recorder
