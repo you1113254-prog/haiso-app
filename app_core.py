@@ -69,6 +69,8 @@ def validate_delivery(record: dict[str, Any]) -> list[str]:
 
     is_rental = as_bool(record.get("is_rental"))
     slip = record.get("rental_slip_status")
+    if is_rental and record.get("visit_status") == "今回は飛ばした":
+        errors.append("R顧客は訪問・伝票計上が必須のため「今回は飛ばした」を選択できません。")
     if is_rental and slip not in RENTAL_SLIP_STATUSES:
         errors.append("レンタル顧客の伝票状況を選択してください。")
     if not is_rental and slip != NON_RENTAL_SLIP_STATUS:
@@ -89,7 +91,10 @@ def slip_already_counted(
             continue
         if month_key(str(record.get("delivery_date", ""))) != target_month:
             continue
-        if record.get("rental_slip_status") == "計上済み":
+        if (
+            record.get("visit_status") in {"補給あり", "訪問・補給なし"}
+            and record.get("rental_slip_status") == "計上済み"
+        ):
             return True
     return False
 
@@ -103,8 +108,11 @@ def summarize(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         as_bool(row.get("is_rental")) and row.get("rental_slip_status") == "未計上"
         for row in rows
     )
+    visits = sum(
+        row.get("visit_status") in {"補給あり", "訪問・補給なし"} for row in rows
+    )
     return {
-        "visits": len(rows),
+        "visits": visits,
         "supplied": supplied,
         "liters": round(total_liters, 1),
         "slips": slips,
