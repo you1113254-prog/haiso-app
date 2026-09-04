@@ -16,9 +16,11 @@ import streamlit as st
 # deployment. Reload it before importing names so app.py and app_core.py always
 # come from the same deployed revision.
 import app_core as _app_core
+import repository as _repository
 
 importlib.invalidate_caches()
 importlib.reload(_app_core)
+importlib.reload(_repository)
 
 from app_core import (
     NON_RENTAL_SLIP_STATUS,
@@ -38,7 +40,8 @@ from app_core import (
     summarize,
     validate_delivery,
 )
-from repository import GoogleSheetsRepository, LocalCsvRepository
+GoogleSheetsRepository = _repository.GoogleSheetsRepository
+LocalCsvRepository = _repository.LocalCsvRepository
 
 
 ROOT = Path(__file__).resolve().parent
@@ -99,7 +102,6 @@ def require_login() -> None:
 require_login()
 
 
-@st.cache_resource
 def build_repository():
     try:
         spreadsheet_id = str(st.secrets["spreadsheet_id"])
