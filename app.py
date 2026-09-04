@@ -23,6 +23,8 @@ from app_core import (
     format_liters,
     month_key,
     month_records,
+    monthly_rental_slip_pending,
+    monthly_unvisited_customers,
     slip_already_counted,
     summarize,
     validate_delivery,
@@ -456,24 +458,77 @@ elif page == "月間チェック":
             st.markdown("#### エリア別")
             st.dataframe(pd.DataFrame(area_rows), hide_index=True, width="stretch")
 
-        counted_codes = {
-            str(row.get("customer_code"))
-            for row in app_rows
-            if row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}
-        }
-        missing = [
-            row for row in customers if row["is_rental"] and row["customer_code"] not in counted_codes
-        ]
-        st.markdown(f"#### 今月まだ伝票計上を確認できないR顧客：{len(missing)}件")
-        st.caption("アプリに登録された記録だけで判定します。月途中は未訪問の顧客も含まれます。")
-        if missing:
-            missing_df = pd.DataFrame(
-                [
-                    {"お客様": row["customer_name"], "コード": row["customer_code"], "エリア": row["area"]}
-                    for row in missing
-                ]
+        unvisited = monthly_unvisited_customers(customers, app_rows)
+        rental_pending = monthly_rental_slip_pending(customers, app_rows)
+
+        st.divider()
+        status_metrics = st.columns(2)
+        status_metrics[0].metric("今月の未訪問", f"{len(unvisited)}件")
+        status_metrics[1].metric("R伝票未計上", f"{len(rental_pending)}件")
+
+        areas = sorted({str(row.get("area", "") or "未設定") for row in customers})
+        selected_area = st.selectbox(
+            "一覧のエリア絞り込み", ["すべて"] + areas, key="monthly_list_area"
+        )
+
+        def in_selected_area(row: dict[str, Any]) -> bool:
+            return selected_area == "すべて" or str(row.get("area", "") or "未設定") == selected_area
+
+        unvisited_view = [row for row in unvisited if in_selected_area(row)]
+        rental_pending_view = [row for row in rental_pending if in_selected_area(row)]
+        unvisited_tab, rental_tab = st.tabs(["未訪問リスト", "R伝票未計上リスト"])
+
+        with unvisited_tab:
+            st.caption(
+                "今月「補給あり」または「訪問・補給なし」の記録がないお客様です。"
+                "「今回は飛ばした」は未訪問として残ります。"
             )
-            st.dataframe(missing_df, hide_index=True, width="stretch")
+            st.write(f"表示：{len(unvisited_view)}件")
+            if unvisited_view:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "お客様": row["customer_name"],
+                                "コード": row["customer_code"],
+                                "エリア": row["area"],
+                                "R": "R" if row["is_rental"] else "",
+                                "今月飛ばした日": row.get("last_skipped_date", ""),
+                            }
+                            for row in unvisited_view
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+            else:
+                st.success("該当する未訪問顧客はいません。")
+
+        with rental_tab:
+            st.caption(
+                "今月訪問済みのR顧客のうち、伝票が「計上済み」または"
+                "「今月すでに計上済み」になっていないお客様です。"
+            )
+            st.write(f"表示：{len(rental_pending_view)}件")
+            if rental_pending_view:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "お客様": row["customer_name"],
+                                "コード": row["customer_code"],
+                                "エリア": row["area"],
+                                "最終訪問日": row.get("last_visit_date", ""),
+                                "訪問結果": row.get("last_visit_status", ""),
+                            }
+                            for row in rental_pending_view
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+            else:
+                st.success("該当するレンタル伝票未計上はありません。")
 
     if app_rows:
         csv_buffer = io.StringIO()
