@@ -124,7 +124,10 @@ def refresh_data() -> None:
     st.session_state["tank_inventory"] = repo.load_tank_inventory()
 
 
-if "customers" not in st.session_state:
+if (
+    "customers" not in st.session_state
+    or "historical_refills" not in st.session_state
+):
     refresh_data()
 
 customers = [row for row in st.session_state["customers"] if row.get("is_active", True)]
