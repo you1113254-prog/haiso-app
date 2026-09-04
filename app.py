@@ -312,7 +312,14 @@ if page == "配送入力":
         )
 
         with st.form("delivery_form", clear_on_submit=False):
-            visit_status = st.radio("訪問結果", VISIT_STATUSES, horizontal=True)
+            available_visit_statuses = (
+                tuple(status for status in VISIT_STATUSES if status != "今回は飛ばした")
+                if customer["is_rental"]
+                else VISIT_STATUSES
+            )
+            visit_status = st.radio("訪問結果", available_visit_statuses, horizontal=True)
+            if customer["is_rental"]:
+                st.caption("R顧客は訪問・伝票計上が必須です。「今回は飛ばした」は選択できません。")
             liters = st.number_input(
                 "灯油量（L）", min_value=0.0, max_value=2000.0, value=0.0, step=0.2, format="%.1f"
             )
