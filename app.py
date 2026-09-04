@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import hmac
+import importlib
 import re
 import uuid
 from datetime import date, datetime
@@ -10,6 +11,14 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+
+# Streamlit Cloud may keep an imported helper module briefly during a hot
+# deployment. Reload it before importing names so app.py and app_core.py always
+# come from the same deployed revision.
+import app_core as _app_core
+
+importlib.invalidate_caches()
+importlib.reload(_app_core)
 
 from app_core import (
     NON_RENTAL_SLIP_STATUS,
