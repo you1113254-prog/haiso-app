@@ -152,6 +152,63 @@ def month_records(records: Iterable[dict[str, Any]], selected_month: str) -> lis
     ]
 
 
+def refill_timeline(
+    records: Iterable[dict[str, Any]], customer_code: str
+) -> list[dict[str, Any]]:
+    refills: list[dict[str, Any]] = []
+    for row in active_records(records):
+        if str(row.get("customer_code", "")).strip() != str(customer_code).strip():
+            continue
+        if row.get("visit_status") != "補給あり" or (as_float(row.get("liters")) or 0) <= 0:
+            continue
+        try:
+            delivery_day = date.fromisoformat(str(row.get("delivery_date", ""))[:10])
+        except ValueError:
+            continue
+        refills.append(
+            {
+                "delivery_date": delivery_day,
+                "delivery_time": str(row.get("delivery_time", "")),
+                "liters": round(as_float(row.get("liters")) or 0.0, 1),
+            }
+        )
+
+    refills.sort(key=lambda row: (row["delivery_date"], row["delivery_time"]))
+    previous_day: date | None = None
+    for row in refills:
+        current_day = row["delivery_date"]
+        row["days_since_previous"] = (
+            (current_day - previous_day).days if previous_day is not None else None
+        )
+        previous_day = current_day
+    return refills
+
+
+def refill_cycle_summary(
+    timeline: Iterable[dict[str, Any]], today: date
+) -> dict[str, Any]:
+    rows = list(timeline)
+    if not rows:
+        return {
+            "last_refill_date": None,
+            "days_since_last": None,
+            "last_cycle_days": None,
+            "average_cycle_days": None,
+        }
+    intervals = [
+        int(row["days_since_previous"])
+        for row in rows
+        if row.get("days_since_previous") is not None
+    ]
+    last_day = rows[-1]["delivery_date"]
+    return {
+        "last_refill_date": last_day,
+        "days_since_last": (today - last_day).days,
+        "last_cycle_days": intervals[-1] if intervals else None,
+        "average_cycle_days": round(sum(intervals) / len(intervals), 1) if intervals else None,
+    }
+
+
 def monthly_unvisited_customers(
     customers: Iterable[dict[str, Any]], records: Iterable[dict[str, Any]]
 ) -> list[dict[str, Any]]:

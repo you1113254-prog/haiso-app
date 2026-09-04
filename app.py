@@ -23,6 +23,8 @@ from app_core import (
     format_liters,
     month_key,
     month_records,
+    refill_cycle_summary,
+    refill_timeline,
     slip_already_counted,
     summarize,
     validate_delivery,
@@ -257,6 +259,54 @@ def show_monthly_metrics(customer: dict) -> None:
     total = sum(as_float(row.get(key)) or 0 for key in month_keys)
     cols[-1].metric(f"{len(month_keys)}か月計", f"{total:,.1f}L")
 
+    dated_refills = refill_timeline(deliveries, customer["customer_code"])
+    dates_by_month: dict[str, list[str]] = {}
+    for refill in dated_refills:
+        key = refill["delivery_date"].strftime("%Y-%m")
+        dates_by_month.setdefault(key, []).append(refill["delivery_date"].strftime("%m/%d"))
+    monthly_details = [
+        {
+            "月": key.replace("-", "年", 1) + "月",
+            "補給日": "・".join(dates_by_month.get(key, [])) or "日付データなし",
+            "月合計": format_liters(row.get(key)),
+        }
+        for key in month_keys
+    ]
+    st.dataframe(pd.DataFrame(monthly_details), hide_index=True, width="stretch")
+
+
+def show_refill_cycle(customer: dict) -> None:
+    timeline = refill_timeline(deliveries, customer["customer_code"])
+    summary = refill_cycle_summary(timeline, now.date())
+    st.markdown("#### 補給サイクル")
+    metrics = st.columns(4)
+    last_day = summary["last_refill_date"]
+    metrics[0].metric("前回補給日", last_day.strftime("%Y/%m/%d") if last_day else "記録なし")
+    elapsed = summary["days_since_last"]
+    metrics[1].metric("今日まで", f"{elapsed}日" if elapsed is not None else "—")
+    last_cycle = summary["last_cycle_days"]
+    metrics[2].metric("直近サイクル", f"{last_cycle}日" if last_cycle is not None else "—")
+    average = summary["average_cycle_days"]
+    metrics[3].metric("平均サイクル", f"{average:g}日" if average is not None else "—")
+
+    if timeline:
+        history_rows = [
+            {
+                "補給日": row["delivery_date"].strftime("%Y/%m/%d"),
+                "補給量": f"{row['liters']:.1f}L",
+                "前回から": (
+                    f"{row['days_since_previous']}日"
+                    if row["days_since_previous"] is not None
+                    else "—"
+                ),
+            }
+            for row in reversed(timeline[-12:])
+        ]
+        with st.expander("日付別の補給履歴を見る"):
+            st.dataframe(pd.DataFrame(history_rows), hide_index=True, width="stretch")
+    else:
+        st.caption("日付入りの補給履歴はまだありません。今後の保存記録から自動計算します。")
+
 
 def dataframe_for_records(rows: list[dict]) -> pd.DataFrame:
     display = []
@@ -302,6 +352,7 @@ if page == "配送入力":
     if customer:
         show_customer_card(customer)
         show_monthly_metrics(customer)
+        show_refill_cycle(customer)
 
         delivery_date = st.date_input("配送日", value=now.date(), key="delivery_date")
         delivery_time = st.time_input(
@@ -332,7 +383,7 @@ if page == "配送入力":
                     horizontal=True,
                 )
                 if already_counted:
-                    st.caption("このお客様は今月すでに伝票計上済みです。")
+                    st.success("今月のレンタル伝票は計上済みです。今回は灯油のみで大丈夫です。")
             else:
                 slip_status = NON_RENTAL_SLIP_STATUS
                 st.caption("レンタル伝票：対象外")
@@ -397,6 +448,7 @@ elif page == "顧客検索":
     if customer:
         show_customer_card(customer)
         show_monthly_metrics(customer)
+        show_refill_cycle(customer)
         rows = history_for(customer["customer_code"])
         st.markdown("#### アプリ登録後の配送履歴")
         if rows:
