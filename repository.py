@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Any, Protocol
+
+from app_core import as_bool, normalize_customer
+
+
+CUSTOMER_HEADERS = [
+    "customer_code",
+    "customer_name",
+    "area",
+    "is_rental",
+    "is_active",
+    "note",
+]
+DELIVERY_HEADERS = [
+    "record_id",
+    "delivery_date",
+    "delivery_time",
+    "customer_code",
+    "customer_name",
+    "area",
+    "is_rental",
+    "visit_status",
+    "liters",
+    "rental_slip_status",
+    "note",
+    "created_at",
+    "updated_at",
+    "is_deleted",
+]
+FORBIDDEN_COLUMNS = {"address", "住所", "郵便番号", "電話番号"}
+
+
+class Repository(Protocol):
+    mode_label: str
+
+    def load_customers(self) -> list[dict[str, Any]]: ...
+    def load_monthly_history(self) -> list[dict[str, Any]]: ...
+    def load_deliveries(self) -> list[dict[str, Any]]: ...
+    def load_tank_inventory(self) -> list[dict[str, Any]]: ...
+    def append_delivery(self, record: dict[str, Any]) -> None: ...
+    def update_delivery(self, record_id: str, record: dict[str, Any]) -> None: ...
+
+
+def _check_privacy(headers: list[str]) -> None:
+    forbidden = FORBIDDEN_COLUMNS.intersection(set(headers))
+    if forbidden:
+        raise ValueError(f"住所等の禁止列を検出しました: {sorted(forbidden)}")
+
+
+def _normalize_sheet_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = {key: value for key, value in row.items() if key}
+    if "customer_code" in normalized:
+        normalized["customer_code"] = str(normalized["customer_code"]).strip()
+    for key in ("is_rental", "is_active", "is_deleted"):
+        if key in normalized:
+            normalized[key] = as_bool(normalized[key])
+    return normalized
+
+
+class LocalCsvRepository:
+    mode_label = "ローカル確認モード"
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+
+    def _read(self, filename: str) -> list[dict[str, Any]]:
+        path = self.data_dir / filename
+        if not path.exists():
+            return []
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            _check_privacy(reader.fieldnames or [])
+            return [_normalize_sheet_row(row) for row in reader]
+
+    def load_customers(self) -> list[dict[str, Any]]:
+        return [normalize_customer(row) for row in self._read("customers.csv")]
+
+    def load_monthly_history(self) -> list[dict[str, Any]]:
+        return self._read("monthly_history.csv")
+
+    def load_deliveries(self) -> list[dict[str, Any]]:
+        return self._read("delivery_records.csv")
+
+    def load_tank_inventory(self) -> list[dict[str, Any]]:
+        return self._read("tank_inventory.csv")
+
+    def append_delivery(self, record: dict[str, Any]) -> None:
+        path = self.data_dir / "delivery_records.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exists = path.exists() and path.stat().st_size > 0
+        with path.open("a", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=DELIVERY_HEADERS)
+            if not exists:
+                writer.writeheader()
+            writer.writerow({key: record.get(key, "") for key in DELIVERY_HEADERS})
+
+    def update_delivery(self, record_id: str, record: dict[str, Any]) -> None:
+        path = self.data_dir / "delivery_records.csv"
+        rows = self.load_deliveries()
+        updated = False
+        for index, row in enumerate(rows):
+            if str(row.get("record_id")) == str(record_id):
+                rows[index] = {**row, **record}
+                updated = True
+                break
+        if not updated:
+            raise KeyError(f"Record not found: {record_id}")
+        temp_path = path.with_suffix(".tmp")
+        with temp_path.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=DELIVERY_HEADERS)
+            writer.writeheader()
+            writer.writerows(
+                {key: row.get(key, "") for key in DELIVERY_HEADERS} for row in rows
+            )
+        temp_path.replace(path)
+
+
+class GoogleSheetsRepository:
+    mode_label = "Google Sheets接続モード"
+
+    def __init__(self, spreadsheet_id: str, service_account: dict[str, Any]):
+        import gspread
+
+        client = gspread.service_account_from_dict(service_account)
+        self.book = client.open_by_key(spreadsheet_id)
+
+    def _records(self, sheet_name: str) -> list[dict[str, Any]]:
+        worksheet = self.book.worksheet(sheet_name)
+        headers = worksheet.row_values(1)
+        _check_privacy(headers)
+        return [
+            _normalize_sheet_row(row)
+            for row in worksheet.get_all_records(numericise_ignore=["all"])
+            if any(str(value).strip() for value in row.values())
+        ]
+
+    def load_customers(self) -> list[dict[str, Any]]:
+        return [normalize_customer(row) for row in self._records("顧客マスター")]
+
+    def load_monthly_history(self) -> list[dict[str, Any]]:
+        return self._records("月次実績")
+
+    def load_deliveries(self) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self._records("配送記録")
+            if str(row.get("record_id", "")).strip()
+        ]
+
+    def load_tank_inventory(self) -> list[dict[str, Any]]:
+        return self._records("タンク在庫")
+
+    def append_delivery(self, record: dict[str, Any]) -> None:
+        worksheet = self.book.worksheet("配送記録")
+        worksheet.append_row(
+            [record.get(key, "") for key in DELIVERY_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+
+    def update_delivery(self, record_id: str, record: dict[str, Any]) -> None:
+        worksheet = self.book.worksheet("配送記録")
+        cell = worksheet.find(str(record_id), in_column=1)
+        if not cell:
+            raise KeyError(f"Record not found: {record_id}")
+        existing = dict(zip(DELIVERY_HEADERS, worksheet.row_values(cell.row)))
+        merged = {**existing, **record}
+        worksheet.update(
+            f"A{cell.row}:N{cell.row}",
+            [[merged.get(key, "") for key in DELIVERY_HEADERS]],
+            value_input_option="USER_ENTERED",
+        )
