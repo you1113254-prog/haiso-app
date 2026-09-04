@@ -155,25 +155,39 @@ def month_records(records: Iterable[dict[str, Any]], selected_month: str) -> lis
 def refill_timeline(
     records: Iterable[dict[str, Any]], customer_code: str
 ) -> list[dict[str, Any]]:
-    refills: list[dict[str, Any]] = []
+    # One calendar day is one cycle point. If an imported historical row and
+    # an app record share a date, prefer the app record because it has the
+    # exact amount and time.
+    refills_by_day: dict[date, dict[str, Any]] = {}
     for row in active_records(records):
         if str(row.get("customer_code", "")).strip() != str(customer_code).strip():
             continue
-        if row.get("visit_status") != "補給あり" or (as_float(row.get("liters")) or 0) <= 0:
+        is_historical = bool(str(row.get("refill_date", "")).strip())
+        if not is_historical and (
+            row.get("visit_status") != "補給あり"
+            or (as_float(row.get("liters")) or 0) <= 0
+        ):
             continue
         try:
-            delivery_day = date.fromisoformat(str(row.get("delivery_date", ""))[:10])
+            raw_date = row.get("refill_date") if is_historical else row.get("delivery_date")
+            delivery_day = date.fromisoformat(str(raw_date or "")[:10])
         except ValueError:
             continue
-        refills.append(
-            {
-                "delivery_date": delivery_day,
-                "delivery_time": str(row.get("delivery_time", "")),
-                "liters": round(as_float(row.get("liters")) or 0.0, 1),
-            }
-        )
+        liters = as_float(row.get("liters"))
+        candidate = {
+            "delivery_date": delivery_day,
+            "delivery_time": str(row.get("delivery_time", "")),
+            "liters": round(liters, 1) if liters is not None else None,
+            "is_historical": is_historical,
+        }
+        current = refills_by_day.get(delivery_day)
+        if current is None or (current["is_historical"] and not is_historical):
+            refills_by_day[delivery_day] = candidate
 
-    refills.sort(key=lambda row: (row["delivery_date"], row["delivery_time"]))
+    refills = sorted(
+        refills_by_day.values(),
+        key=lambda row: (row["delivery_date"], row["delivery_time"]),
+    )
     previous_day: date | None = None
     for row in refills:
         current_day = row["delivery_date"]
