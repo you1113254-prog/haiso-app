@@ -1,1285 +1,505 @@
+from __future__ import annotations
+
+import io
+import hmac
+import re
+import uuid
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pandas as pd
 import streamlit as st
-import gspread
-import datetime
 
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1VPO7xDMz_HPXyWuy8YVhHQQvmrmfGFG5bSuRDdtQ3DM"
+from app_core import (
+    NON_RENTAL_SLIP_STATUS,
+    RENTAL_SLIP_STATUSES,
+    VISIT_STATUSES,
+    active_records,
+    area_summary,
+    as_bool,
+    as_float,
+    customer_label,
+    format_liters,
+    month_key,
+    month_records,
+    slip_already_counted,
+    summarize,
+    validate_delivery,
+)
+from repository import GoogleSheetsRepository, LocalCsvRepository
 
-SHEET_NAMES = [
-    "宜野座 と金武1～3",
-    "恩納村",
-    "石川1 ～4",
-    "読谷",
-    "うるま",
-    "本部、今帰仁",
-    "勝連",
-    "沖縄市",
-    "名護",
-    "国頭、東、大宜味",
-    "宇茂佐、屋部、為又",
-    "屋我地、真喜屋、伊差川",
-    "辺野古、大浦",
-]
+
+ROOT = Path(__file__).resolve().parent
+JST = ZoneInfo("Asia/Tokyo")
+
+st.set_page_config(
+    page_title="灯油配送台帳",
+    page_icon="🛢️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+      .block-container {padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1100px;}
+      div[data-testid="stMetric"] {border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px;}
+      div[data-testid="stForm"] {border: 1px solid #dbeafe; border-radius: 14px; padding: 18px;}
+      .customer-card {background:#f8fafc;border:1px solid #dbe3ec;border-radius:14px;padding:14px 16px;margin:8px 0 16px;}
+      .customer-name {font-size:1.35rem;font-weight:700;margin-bottom:6px;}
+      .privacy-note {font-size:.9rem;color:#475569;background:#f1f5f9;border-radius:10px;padding:10px 12px;}
+      @media (max-width: 720px) {.block-container {padding-left: .8rem; padding-right: .8rem;} }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def require_login() -> None:
+    """Keep the existing app login without publishing its password in source."""
+    if st.session_state.get("authenticated"):
+        return
+
+    try:
+        configured_password = str(st.secrets.get("APP_PASSWORD", ""))
+    except FileNotFoundError:
+        configured_password = ""
+
+    if not configured_password:
+        st.error("管理者によるログインパスワード設定が必要です。")
+        st.stop()
+
+    st.title("🛢️ 灯油配送台帳")
+    st.subheader("ログイン")
+    with st.form("login_form"):
+        entered = st.text_input("パスワード", type="password")
+        submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
+
+    if submitted:
+        valid = hmac.compare_digest(entered, configured_password)
+        if valid:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        st.error("パスワードが違います。")
+    st.stop()
+
+
+require_login()
+
 
 @st.cache_resource
-def connect_sheets():
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-    from google.oauth2.service_account import Credentials
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-    return gspread.authorize(creds)
-
-@st.cache_data(ttl=300)
-def load_all_data():
-    client = connect_sheets()
-    spreadsheet = client.open_by_url(SPREADSHEET_URL)
-    all_data = []
-    for sheet_name in SHEET_NAMES:
-        try:
-            sheet = spreadsheet.worksheet(sheet_name)
-            records = sheet.get_all_records()
-            for row in records:
-                # 空白行を除外（顧客コードが空のものをスキップ）
-                if not row.get("顧客コード") and not row.get("名前"):
-                    continue
-                row["エリア"] = sheet_name
-                all_data.append(row)
-        except Exception as e:
-            st.warning(f"⚠️ {sheet_name} スキップ：{e}")
-    return all_data
-
-@st.cache_data(ttl=300)
-def load_delivery_records():
-    """配送記録シートを全件取得。シートが存在しない場合は空リストを返す。"""
+def build_repository():
     try:
-        client = connect_sheets()
-        spreadsheet = client.open_by_url(SPREADSHEET_URL)
-        sheet = spreadsheet.worksheet("配送記録")
-        return sheet.get_all_records()
-    except Exception:
-        return []
+        spreadsheet_id = str(st.secrets["spreadsheet_id"])
+        service_account = dict(st.secrets["gcp_service_account"])
+        if service_account.get("private_key"):
+            service_account["private_key"] = str(service_account["private_key"]).replace(
+                "\\n", "\n"
+            )
+        if spreadsheet_id and service_account:
+            return GoogleSheetsRepository(spreadsheet_id, service_account)
+    except (KeyError, FileNotFoundError):
+        pass
+    local_customers = ROOT / "data" / "customers.csv"
+    if local_customers.exists():
+        return LocalCsvRepository(ROOT / "data")
+    raise RuntimeError("Google Sheetsの接続設定が見つかりません。")
 
-# ── 汎用シート操作（タスク・記憶などで使用） ─────────────────
-@st.cache_data(ttl=60)
-def load_sheet_data(sheet_name):
-    """指定シートの全レコードを取得。シートがなければ空リスト。"""
-    try:
-        client = connect_sheets()
-        spreadsheet = client.open_by_url(SPREADSHEET_URL)
-        sheet = spreadsheet.worksheet(sheet_name)
-        return sheet.get_all_records()
-    except Exception:
-        return []
-
-def get_or_create_sheet(sheet_name, headers):
-    """シートを取得。なければヘッダー付きで作成して返す。"""
-    client = connect_sheets()
-    spreadsheet = client.open_by_url(SPREADSHEET_URL)
-    try:
-        return spreadsheet.worksheet(sheet_name)
-    except Exception:
-        sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
-        # append_row を使わず、A1 から確実にヘッダーを書き込む
-        end_col_letter = chr(ord('A') + len(headers) - 1)
-        sheet.update(values=[headers], range_name=f"A1:{end_col_letter}1")
-        return sheet
-
-def safe_append_rows(sheet, rows, num_cols):
-    """append_rows のバグ（変な列にズレる）を回避する超安全な追記関数。
-    各セルを (row, col) で明示指定して update_cells で書き込む。
-    range_name 解釈の揺れに依存しないため、列ズレが起きない。"""
-    if not rows:
-        return
-    # A〜num_cols列のうち、どこかにデータがある最終行を探す
-    end_col_letter = chr(ord('A') + num_cols - 1)
-    existing = sheet.get(f"A1:{end_col_letter}")  # ヘッダー含む全範囲
-    last_used_row = 0
-    for idx, r in enumerate(existing or []):
-        if any(str(c).strip() for c in r):
-            last_used_row = idx + 1   # 1始まり
-    next_row = max(last_used_row + 1, 2)  # ヘッダー行を上書きしないよう最低2
-
-    cells = []
-    for r_off, row in enumerate(rows):
-        # 念のため num_cols に揃える
-        padded = list(row) + [""] * (num_cols - len(row))
-        padded = padded[:num_cols]
-        for c_off, val in enumerate(padded):
-            cells.append(gspread.Cell(row=next_row + r_off, col=c_off + 1, value=val))
-    sheet.update_cells(cells, value_input_option="USER_ENTERED")
-
-st.set_page_config(page_title="灯油配送アプリ", page_icon="⛽", layout="centered")
-
-# ── パスワード認証 ────────────────────────────────────────────
-PASSWORD = "haiso2026"
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    st.title("⛽ 灯油配送アプリ")
-    st.markdown("---")
-    st.subheader("🔒 ログイン")
-    with st.form("login_form"):
-        pw = st.text_input("パスワードを入力してください", type="password")
-        login_btn = st.form_submit_button("ログイン", use_container_width=True)
-    if login_btn:
-        if pw == PASSWORD:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("❌ パスワードが違います")
-    st.stop()
-
-# ログアウトボタン（サイドバー）
-with st.sidebar:
-    st.write("⛽ 灯油配送アプリ")
-    if st.button("🔓 ログアウト", use_container_width=True):
-        st.session_state.authenticated = False
-        st.rerun()
-
-# ── メインアプリ ──────────────────────────────────────────────
-st.title("⛽ 灯油配送アプリ")
-st.write("名前・顧客コード・住所の一部を入れて検索できます。")
 
 try:
-    data = load_all_data()
-    st.success(f"✅ 全シートから {len(data)}件 読み込み完了")
-except Exception as e:
-    st.error(f"❌ 読み込みエラー：{e}")
+    repo = build_repository()
+except Exception:
+    st.error("Google Sheetsへ接続できません。管理者へ接続設定の確認を依頼してください。")
     st.stop()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
-    "🔎 名前検索", "🔢 顧客コード検索", "📍 住所検索",
-    "📋 今日の配送リスト", "📝 配送記録入力",
-    "⚠️ アラート", "👤 顧客管理", "📊 日報", "🤖 AIアシスタント",
-    "✅ タスク",
-])
 
-def show_results(results):
-    if not results:
-        st.warning("該当なし")
-        return
+def refresh_data() -> None:
+    st.session_state["customers"] = repo.load_customers()
+    st.session_state["monthly_history"] = repo.load_monthly_history()
+    st.session_state["deliveries"] = repo.load_deliveries()
+    st.session_state["tank_inventory"] = repo.load_tank_inventory()
 
-    st.success(f"{len(results)}件見つかりました")
-    all_delivery = load_delivery_records()   # キャッシュ済みなので高速
 
-    for row in results:
-        code = str(row.get("顧客コード", "")).strip()
-        st.write(f"**顧客コード:** {code or '---'}")
-        st.write(f"**名前:** {row.get('名前','---')}")
-        st.write(f"**住所:** {row.get('住所','---')}")
-        st.write(f"**エリア:** {row.get('エリア','---')}")
+if "customers" not in st.session_state:
+    refresh_data()
 
-        # ── 配送履歴（この顧客の全記録） ─────────────────────────
-        history = [
-            r for r in all_delivery
-            if code and str(r.get("顧客コード", "")).strip() == code
-        ]
+customers = [row for row in st.session_state["customers"] if row.get("is_active", True)]
+monthly_history = st.session_state["monthly_history"]
+deliveries = st.session_state["deliveries"]
+tank_inventory = st.session_state["tank_inventory"]
 
-        # ── 最終補給情報 ──────────────────────────────────────
-        supply_records = []
-        for _h in history:
-            try:
-                _sp = float(_h.get("補給量(L)", 0) or 0)
-            except (ValueError, TypeError):
-                _sp = 0.0
-            if _sp > 0:
-                supply_records.append((str(_h.get("日付", "")), _sp))
 
-        if supply_records:
-            supply_records.sort(key=lambda x: x[0], reverse=True)   # 新しい順
-            _last_date_str, _last_supply = supply_records[0]
-            try:
-                _last_date = datetime.date.fromisoformat(_last_date_str)
-                _days_ago  = (datetime.date.today() - _last_date).days
-                _date_jp   = f"{_last_date.year}年{_last_date.month}月{_last_date.day}日"
-                st.write(f"🗓️ **最終補給日：** {_date_jp}（{_days_ago}日前）")
-            except ValueError:
-                st.write(f"🗓️ **最終補給日：** {_last_date_str}")
-            st.write(f"⛽ **最終補給量：** {_last_supply:.2f} L")
-        else:
-            st.caption("📭 補給記録なし")
+def clear_pending() -> None:
+    st.session_state.pop("pending_delivery", None)
 
-        if history:
-            with st.expander(f"📦 配送履歴（{len(history)}件）を見る"):
-                # 月別集計
-                monthly: dict = {}
-                for h in history:
-                    date_str = str(h.get("日付", ""))
-                    try:
-                        supply = float(h.get("補給量(L)", 0) or 0)
-                    except (ValueError, TypeError):
-                        supply = 0.0
-                    if len(date_str) >= 7:
-                        ym = date_str[:7]                 # "YYYY-MM"
-                        y, m = ym[:4], ym[5:7].lstrip("0") or "0"
-                        label = f"{y}年{m}月"
-                    else:
-                        label = "不明"
-                    monthly[label] = monthly.get(label, 0.0) + supply
 
-                # 月別補給量（新しい月順）
-                st.markdown("**📅 月別補給量**")
-                for label in sorted(monthly.keys(), reverse=True):
-                    st.write(f"　・{label}：**{monthly[label]:.2f} L**")
-
-                # 年間合計・月平均
-                total_all = sum(monthly.values())
-                active_months = len([v for v in monthly.values() if v > 0])
-                monthly_avg = total_all / active_months if active_months else 0.0
-                st.info(
-                    f"📊 年間合計：**{total_all:.2f} L**　｜　"
-                    f"月平均：**{monthly_avg:.2f} L**（{active_months}か月分）"
-                )
-
-                st.markdown("---")
-
-                # 個別履歴一覧（新しい順）
-                st.markdown("**📋 訪問履歴一覧**")
-                for h in sorted(history, key=lambda x: str(x.get("日付", "")), reverse=True):
-                    d = str(h.get("日付", "---"))
-                    try:
-                        sp = float(h.get("補給量(L)", 0) or 0)
-                    except (ValueError, TypeError):
-                        sp = 0.0
-                    absent = "🚪不在　" if str(h.get("不在", "")).strip() == "✓" else ""
-                    rental = "📄伝票あり" if str(h.get("レンタル伝票投函", "")).strip() == "✓" else ""
-                    st.write(f"**{d}**　補給量: {sp:.2f} L　{absent}{rental}")
-        else:
-            st.caption("（配送記録なし）")
-
-        st.markdown("---")
-
-with tab1:
-    k = st.text_input("名前の一部を入力", key="name")
-    if k:
-        show_results([r for r in data if k in str(r.get("名前",""))])
-
-with tab2:
-    k = st.text_input("顧客コードの一部を入力", key="code")
-    if k:
-        show_results([r for r in data if k in str(r.get("顧客コード",""))])
-
-with tab3:
-    k = st.text_input("住所の一部を入力", key="addr")
-    if k:
-        show_results([r for r in data if k in str(r.get("住所",""))])
-
-# ── 今日の配送リスト ──────────────────────────────────────────
-with tab4:
-    st.subheader("📋 今日の配送リスト")
-    today_str    = datetime.date.today().strftime("%Y-%m-%d")
-    _t4_month    = datetime.date.today().strftime("%Y-%m")
-    st.caption(f"📅 配送日：{today_str}")
-
-    area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="delivery_area")
-    area_data = [r for r in data if r.get("エリア") == area]
-
-    if not area_data:
-        st.warning("このエリアに顧客データがありません")
-    else:
-        # ── 今月の訪問状況を配送記録から取得 ──────────────────
-        _t4_all = load_delivery_records()
-
-        # 今月1度でも訪問済み（✓）の顧客コードセット
-        _t4_visited = {
-            str(r.get("顧客コード", "")).strip()
-            for r in _t4_all
-            if str(r.get("日付", "")).strip().startswith(_t4_month)
-            and str(r.get("訪問済み", "")).strip() == "✓"
-        }
-
-        # 各顧客の最終補給情報（code → (date_str, supply)）
-        _t4_last: dict = {}
-        for _r in _t4_all:
-            _c = str(_r.get("顧客コード", "")).strip()
-            try:
-                _s = float(_r.get("補給量(L)", 0) or 0)
-            except (ValueError, TypeError):
-                _s = 0.0
-            if _c and _s > 0:
-                _d = str(_r.get("日付", ""))
-                if _c not in _t4_last or _d > _t4_last[_c][0]:
-                    _t4_last[_c] = (_d, _s)
-
-        # ── エリアサマリー ─────────────────────────────────────
-        _t4_v_cnt = sum(
-            1 for r in area_data
-            if str(r.get("顧客コード", "")).strip() in _t4_visited
-        )
-        _t4_u_cnt = len(area_data) - _t4_v_cnt
-
-        _sc1, _sc2, _sc3 = st.columns(3)
-        _sc1.info(f"📦 {len(area_data)} 件")
-        _sc2.success(f"✅ 今月訪問済み：{_t4_v_cnt} 件")
-        if _t4_u_cnt > 0:
-            _sc3.warning(f"⚠️ 今月未訪問：{_t4_u_cnt} 件")
-        else:
-            _sc3.success(f"✅ 今月未訪問：0 件")
-
-        # ── 入力フォーム ───────────────────────────────────────
-        with st.form("delivery_form"):
-            records = []
-            for i, row in enumerate(area_data):
-                code       = str(row.get("顧客コード", "")).strip()
-                name       = row.get("名前", "---")
-                is_visited = code in _t4_visited
-                is_rental  = code.upper().endswith("R")
-
-                # 訪問状態バッジ（HTML）
-                if is_visited:
-                    badge = (
-                        "<span style='background:#d4edda;color:#155724;"
-                        "border-radius:4px;padding:2px 8px;"
-                        "font-size:0.82em;font-weight:bold;'>"
-                        "✅ 今月訪問済み</span>"
-                    )
-                else:
-                    badge = (
-                        "<span style='background:#fff3cd;color:#856404;"
-                        "border-radius:4px;padding:2px 8px;"
-                        "font-size:0.82em;font-weight:bold;'>"
-                        "⚠️ 今月未訪問</span>"
-                    )
-
-                rental_mark = "　🔴" if is_rental else ""
-                st.markdown(
-                    f"**{name}{rental_mark}**　`{code}`　{badge}",
-                    unsafe_allow_html=True,
-                )
-
-                # 最終補給情報（小さく）
-                if code in _t4_last:
-                    _ld, _ls = _t4_last[code]
-                    try:
-                        _ldt  = datetime.date.fromisoformat(_ld)
-                        _ldjp = f"{_ldt.year}年{_ldt.month}月{_ldt.day}日"
-                        _days = (datetime.date.today() - _ldt).days
-                        st.caption(f"🗓️ 最終補給：{_ldjp}（{_days}日前）　{_ls:.2f} L")
-                    except ValueError:
-                        st.caption(f"🗓️ 最終補給：{_ld}　{_ls:.2f} L")
-
-                st.caption(f"📍 {row.get('住所', '---')}")
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    visited = st.checkbox("✅ 訪問済み", key=f"visited_{i}")
-                with col2:
-                    supply = st.number_input(
-                        "🛢 補給量 (L)",
-                        min_value=0.0,
-                        step=0.01,
-                        format="%.2f",
-                        key=f"supply_{i}"
-                    )
-                with col3:
-                    absent = st.checkbox("🚪 不在", key=f"absent_{i}")
-                with col4:
-                    rental = st.checkbox("📄 レンタル伝票投函", key=f"rental_{i}")
-
-                st.markdown("---")
-
-                records.append({
-                    "日付":            today_str,
-                    "エリア":          area,
-                    "顧客コード":      code,
-                    "名前":            str(row.get("名前", "")),
-                    "住所":            str(row.get("住所", "")),
-                    "訪問済み":        visited,
-                    "補給量(L)":       supply,
-                    "不在":            absent,
-                    "レンタル伝票投函": rental,
-                })
-
-            submitted = st.form_submit_button(
-                "💾 スプレッドシートに保存する",
-                use_container_width=True
-            )
-
-        if submitted:
-            try:
-                # ✅ 共通ヘルパーで安全にシート取得
-                record_sheet = get_or_create_sheet("配送記録", [
-                    "日付", "エリア", "顧客コード", "名前", "住所",
-                    "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
-                ])
-
-                # 全顧客分をまとめて追記
-                rows_to_append = []
-                for rec in records:
-                    rows_to_append.append([
-                        rec["日付"],
-                        rec["エリア"],
-                        rec["顧客コード"],
-                        rec["名前"],
-                        rec["住所"],
-                        "✓" if rec["訪問済み"] else "",
-                        rec["補給量(L)"] if rec["補給量(L)"] > 0 else "",
-                        "✓" if rec["不在"] else "",
-                        "✓" if rec["レンタル伝票投函"] else "",
-                    ])
-
-                # ✅ append_rows のズレバグを回避する安全な書き込み方式
-                safe_append_rows(record_sheet, rows_to_append, num_cols=9)
-                st.success(f"✅ {len(records)} 件の配送記録をスプレッドシートに保存しました！")
-                load_delivery_records.clear()   # キャッシュをリフレッシュ
-
-            except Exception as e:
-                st.error(f"❌ 保存エラー：{e}")
-
-# ── 配送記録入力 ──────────────────────────────────────────────
-with tab5:
-    st.subheader("📝 配送記録入力")
-
-    # 日付選択（デフォルトは今日）
-    selected_date = st.date_input("📅 配送日を選択", value=datetime.date.today(), key="record_date")
-    record_date_str = selected_date.strftime("%Y-%m-%d")
-    st.caption(f"配送日：{record_date_str}")
-
-    # エリア選択
-    record_area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="record_area")
-    record_area_data = [r for r in data if r.get("エリア") == record_area]
-
-    if not record_area_data:
-        st.warning("このエリアに顧客データがありません")
-    else:
-        st.info(f"📦 {len(record_area_data)} 件の顧客が見つかりました")
-
-        with st.form("record_input_form"):
-            record_entries = []
-            for i, row in enumerate(record_area_data):
-                st.markdown(
-                    f"**{row.get('名前', '---')}**　｜　"
-                    f"顧客コード: `{row.get('顧客コード', '---')}`"
-                )
-                st.caption(f"📍 {row.get('住所', '---')}")
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    rec_visited = st.checkbox("✅ 訪問済み", key=f"rec_visited_{i}")
-                with col2:
-                    rec_supply = st.number_input(
-                        "🛢 補給量 (L)",
-                        min_value=0.0,
-                        step=0.01,
-                        format="%.2f",
-                        key=f"rec_supply_{i}"
-                    )
-                with col3:
-                    rec_absent = st.checkbox("🚪 不在", key=f"rec_absent_{i}")
-                with col4:
-                    rec_rental = st.checkbox("📄 レンタル伝票投函", key=f"rec_rental_{i}")
-
-                st.markdown("---")
-
-                record_entries.append({
-                    "日付":            record_date_str,
-                    "エリア":          record_area,
-                    "顧客コード":      str(row.get("顧客コード", "")),
-                    "名前":            str(row.get("名前", "")),
-                    "住所":            str(row.get("住所", "")),
-                    "訪問済み":        rec_visited,
-                    "補給量(L)":       rec_supply,
-                    "不在":            rec_absent,
-                    "レンタル伝票投函": rec_rental,
-                })
-
-            rec_submitted = st.form_submit_button(
-                "💾 スプレッドシートに保存する",
-                use_container_width=True
-            )
-
-        if rec_submitted:
-            try:
-                client = connect_sheets()
-                spreadsheet = client.open_by_url(SPREADSHEET_URL)
-
-                # 「配送記録」シートを取得。なければ新規作成
-                record_sheet = get_or_create_sheet("配送記録", [
-                    "日付", "エリア", "顧客コード", "名前", "住所",
-                    "訪問済み", "補給量(L)", "不在", "レンタル伝票投函"
-                ])
-
-                # 全顧客分をまとめて追記
-                rows_to_append = []
-                for rec in record_entries:
-                    rows_to_append.append([
-                        rec["日付"],
-                        rec["エリア"],
-                        rec["顧客コード"],
-                        rec["名前"],
-                        rec["住所"],
-                        "✓" if rec["訪問済み"] else "",
-                        rec["補給量(L)"] if rec["補給量(L)"] > 0 else "",
-                        "✓" if rec["不在"] else "",
-                        "✓" if rec["レンタル伝票投函"] else "",
-                    ])
-
-                # ✅ append_rows のズレバグを回避する安全な書き込み方式
-                safe_append_rows(record_sheet, rows_to_append, num_cols=9)
-                load_delivery_records.clear()
-                st.success(f"✅ {len(record_entries)} 件の配送記録をスプレッドシートに保存しました！")
-
-            except Exception as e:
-                st.error(f"❌ 保存エラー：{e}")
-
-# ── アラート ──────────────────────────────────────────────────
-with tab6:
-    st.subheader("⚠️ 未訪問・伝票漏れアラート")
-
-    _today        = datetime.date.today()
-    _month_prefix = _today.strftime("%Y-%m")          # 例: "2026-03"
-    st.caption(f"📅 対象月：{_today.year}年{_today.month}月（今月固定）")
-
-    if st.button("🔍 今月のアラートを確認する", use_container_width=True, key="check_alerts"):
-        try:
-            client      = connect_sheets()
-            spreadsheet = client.open_by_url(SPREADSHEET_URL)
-
-            try:
-                record_sheet = spreadsheet.worksheet("配送記録")
-                all_records  = record_sheet.get_all_records()
-            except Exception:
-                st.warning("⚠️ 配送記録シートが見つかりません。先に配送記録を保存してください。")
-                st.stop()
-
-            # 今月の記録だけ絞り込む
-            month_records = [
-                r for r in all_records
-                if str(r.get("日付", "")).strip().startswith(_month_prefix)
-            ]
-
-            # 今月1度でも訪問済み（✓）になった顧客コードのセット
-            visited_codes = {
-                str(r.get("顧客コード", "")).strip()
-                for r in month_records
-                if str(r.get("訪問済み", "")).strip() == "✓"
-            }
-
-            # 今月1度でも伝票投函済み（✓）になったレンタル顧客コードのセット
-            rental_done_codes = {
-                str(r.get("顧客コード", "")).strip()
-                for r in month_records
-                if str(r.get("レンタル伝票投函", "")).strip() == "✓"
-            }
-
-            # エリア別に未訪問・伝票漏れを集計
-            area_results = {}
-            total_unvisited     = 0
-            total_rental_missed = 0
-
-            for area_name in SHEET_NAMES:
-                area_customers = [r for r in data if r.get("エリア") == area_name]
-                unvisited = [
-                    c for c in area_customers
-                    if str(c.get("顧客コード", "")).strip() not in visited_codes
-                ]
-                rental_missed = [
-                    c for c in area_customers
-                    if str(c.get("顧客コード", "")).strip().upper().endswith("R")
-                    and str(c.get("顧客コード", "")).strip() not in rental_done_codes
-                ]
-                area_results[area_name] = {
-                    "unvisited":     unvisited,
-                    "rental_missed": rental_missed,
-                }
-                total_unvisited     += len(unvisited)
-                total_rental_missed += len(rental_missed)
-
-            # ══ ① 大きなサマリー表示 ═══════════════════════════════
-            visited_count = len(data) - total_unvisited
-            st.markdown(
-                f"<div style='text-align:center;padding:16px 0 8px;'>"
-                f"<span style='font-size:1.1rem;color:#555;'>今月の訪問状況</span><br>"
-                f"<span style='font-size:2.4rem;font-weight:bold;color:#1f77b4;'>"
-                f"全 {len(data)} 件中</span>"
-                f"<span style='font-size:2.4rem;font-weight:bold;color:#d62728;'>"
-                f"　残り {total_unvisited} 件</span>"
-                f"<span style='font-size:1.6rem;color:#555;'> 未訪問</span><br>"
-                f"<span style='font-size:1.1rem;color:#2ca02c;'>✅ 訪問済み {visited_count} 件</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown("---")
-
-            # ══ ② 未訪問顧客リスト（エリア別） ══════════════════════
-            st.markdown("### 🚶 今月まだ訪問記録がない顧客")
-            if total_unvisited == 0:
-                st.success("✅ 全顧客に訪問済みです！")
-            else:
-                for area_name in SHEET_NAMES:
-                    unvisited = area_results[area_name]["unvisited"]
-                    if not unvisited:
-                        continue
-                    with st.expander(
-                        f"📍 {area_name}　（{len(unvisited)} 件）",
-                        expanded=True,
-                    ):
-                        for c in unvisited:
-                            code = str(c.get("顧客コード", "")).strip()
-                            name = c.get("名前", "---")
-                            addr = c.get("住所", "---")
-                            is_rental = code.upper().endswith("R")
-                            line = (
-                                f"**{name}**　｜　"
-                                f"コード: `{code}`　｜　{addr}"
-                            )
-                            if is_rental:
-                                st.error(f"🔴 {line}")   # レンタル顧客は赤
-                            else:
-                                st.warning(line)
-
-            st.markdown("---")
-
-            # ══ ③ 伝票投函漏れリスト（エリア別） ════════════════════
-            st.markdown("### 📄 今月伝票投函記録がないレンタル顧客")
-            if total_rental_missed == 0:
-                st.success("✅ 伝票投函漏れはありません！")
-            else:
-                for area_name in SHEET_NAMES:
-                    rental_missed = area_results[area_name]["rental_missed"]
-                    if not rental_missed:
-                        continue
-                    with st.expander(
-                        f"📍 {area_name}　（{len(rental_missed)} 件）",
-                        expanded=True,
-                    ):
-                        for c in rental_missed:
-                            code = str(c.get("顧客コード", "")).strip()
-                            st.error(
-                                f"**{c.get('名前', '---')}**　｜　"
-                                f"コード: `{code}`　｜　{c.get('住所', '---')}"
-                            )
-
-            # ══ ④ 集計サマリー ════════════════════════════════════
-            st.markdown("---")
-            st.info(
-                f"📊 {_today.year}年{_today.month}月の配送記録：{len(month_records)} 件　｜　"
-                f"未訪問 **{total_unvisited}** 件　｜　"
-                f"伝票投函漏れ **{total_rental_missed}** 件"
-            )
-
-        except Exception as e:
-            st.error(f"❌ 読み込みエラー：{e}")
-
-# ── 顧客管理 ──────────────────────────────────────────────────
-with tab7:
-    st.subheader("👤 顧客管理")
-
-    mgmt_area = st.selectbox("エリアを選択してください", SHEET_NAMES, key="mgmt_area")
-
-    # エリアが変わるたびにスプレッドシートから直接取得
-    try:
-        _mgmt_client = connect_sheets()
-        _mgmt_spreadsheet = _mgmt_client.open_by_url(SPREADSHEET_URL)
-        _mgmt_sheet = _mgmt_spreadsheet.worksheet(mgmt_area)
-        _all_values = _mgmt_sheet.get_all_values()
-        mgmt_area_data = []
-        if len(_all_values) > 1:
-            headers = _all_values[0]
-            for row in _all_values[1:]:
-                r2 = {}
-                for i, h in enumerate(headers):
-                    if i < len(row):
-                        r2[h.strip()] = str(row[i]).strip()
-                if r2.get("顧客コード") or r2.get("名前"):
-                    r2["エリア"] = mgmt_area
-                    mgmt_area_data.append(r2)
-    except Exception as e:
-        mgmt_area_data = []
-        st.error(f"読み込みエラー：{e}")
-    st.info(f"📋 {len(mgmt_area_data)} 件の顧客が登録されています")
-
-    # ── 新規顧客追加 ──────────────────────────────────────────
-    with st.expander("➕ 新規顧客を追加する"):
-        with st.form("add_customer_form"):
-            new_code = st.text_input("顧客コード *", key="new_code")
-            new_name = st.text_input("名前 *", key="new_name")
-            new_addr = st.text_input("住所", key="new_addr")
-            add_btn = st.form_submit_button("追加する", use_container_width=True)
-
-        if add_btn:
-            if not new_code.strip() or not new_name.strip():
-                st.error("❌ 顧客コードと名前は必須です")
-            else:
-                try:
-                    _add_client = connect_sheets()
-                    _add_spreadsheet = _add_client.open_by_url(SPREADSHEET_URL)
-                    sheet = _add_spreadsheet.worksheet(mgmt_area)
-
-                    # ヘッダーを確認して列順に合わせて追加
-                    headers = sheet.row_values(1)
-                    new_row = [""] * max(len(headers), 3)
-                    for col_name, val in [
-                        ("顧客コード", new_code.strip()),
-                        ("名前", new_name.strip()),
-                        ("住所", new_addr.strip()),
-                    ]:
-                        if col_name in headers:
-                            new_row[headers.index(col_name)] = val
-                    sheet.append_row(new_row)
-
-                    st.success(f"✅ {new_name.strip()} を追加しました！")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 追加エラー：{e}")
-
-    # ── 新規エリア追加 ─────────────────────────────────────────
-    with st.expander("➕ 新規エリアを追加する"):
-        with st.form("add_area_form"):
-            new_area_name = st.text_input("新しいエリア名 *", key="new_area_name")
-            add_area_btn = st.form_submit_button("エリアを追加する", use_container_width=True)
-
-        if add_area_btn:
-            _area_stripped = new_area_name.strip()
-            if not _area_stripped:
-                st.error("❌ エリア名を入力してください")
-            elif _area_stripped in SHEET_NAMES:
-                st.error(f"❌ エリア『{_area_stripped}』はすでに存在します")
-            else:
-                try:
-                    # Googleスプレッドシートに新しいシートを作成
-                    _area_client = connect_sheets()
-                    _area_spreadsheet = _area_client.open_by_url(SPREADSHEET_URL)
-                    new_sheet = _area_spreadsheet.add_worksheet(
-                        title=_area_stripped, rows=500, cols=10
-                    )
-                    # ヘッダー行を追加
-                    new_sheet.append_row(["レコードID", "顧客コード", "名前", "住所"])
-
-                    # app.py の SHEET_NAMES リストに新しいエリア名を追加
-                    import re as _re
-                    _app_path = __file__
-                    with open(_app_path, "r", encoding="utf-8") as _f:
-                        _src = _f.read()
-                    _new_entry = f'    "{_area_stripped}",\n'
-                    _src = _re.sub(
-                        r'(SHEET_NAMES\s*=\s*\[[\s\S]*?)(]\s*\n)',
-                        lambda m: m.group(1) + _new_entry + m.group(2),
-                        _src,
-                        count=1,
-                    )
-                    with open(_app_path, "w", encoding="utf-8") as _f:
-                        _f.write(_src)
-
-                    st.success(f"✅ エリア『{_area_stripped}』を追加しました")
-                    load_all_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ エリア追加エラー：{e}")
-
-    st.markdown("---")
-    st.subheader("✏️ 既存顧客の編集")
-
-    if not mgmt_area_data:
-        st.warning("このエリアに顧客データがありません")
-    else:
-        for i, row in enumerate(mgmt_area_data):
-            code = str(row.get("顧客コード", "")).strip()
-            name = str(row.get("名前", "")).strip()
-            addr = str(row.get("住所", "")).strip()
-
-            # 行番号＋顧客コードでキーを生成（重複コードがあっても衝突しない）
-            safe_key = f"{i}_{code.replace(' ', '_')}"
-
-            # 表示タイトル：名前（コード: 顧客コード）形式
-            label = f"{name}（コード: {code}）" if code else f"{name}（コード未設定）"
-
-            with st.expander(label):
-                with st.form(f"edit_form__{safe_key}"):
-                    edit_name = st.text_input("名前", value=name, key=f"edit_name__{safe_key}")
-                    # 住所は任意入力（空でもOK）
-                    edit_addr = st.text_input("住所（任意）", value=addr, key=f"edit_addr__{safe_key}")
-                    save_btn = st.form_submit_button("💾 この顧客を保存", use_container_width=True)
-
-                if save_btn:
-                    try:
-                        _edit_client = connect_sheets()
-                        _edit_spreadsheet = _edit_client.open_by_url(SPREADSHEET_URL)
-                        _edit_sheet = _edit_spreadsheet.worksheet(mgmt_area)
-
-                        # 全データを取得して顧客コードで行番号を特定
-                        _edit_values = _edit_sheet.get_all_values()
-                        _edit_headers = _edit_values[0] if _edit_values else []
-                        code_col = _edit_headers.index("顧客コード") if "顧客コード" in _edit_headers else None
-                        name_col = _edit_headers.index("名前")      if "名前"      in _edit_headers else None
-                        addr_col = _edit_headers.index("住所")      if "住所"      in _edit_headers else None
-
-                        target_row = None
-                        for row_idx, row_vals in enumerate(_edit_values[1:], start=2):
-                            row_code = str(row_vals[code_col]).strip() if code_col is not None and code_col < len(row_vals) else ""
-                            # 顧客コードで行を特定
-                            if row_code == code:
-                                target_row = row_idx
-                                break
-
-                        if target_row:
-                            if name_col is not None:
-                                _edit_sheet.update_cell(target_row, name_col + 1, edit_name)
-                            if addr_col is not None:
-                                _edit_sheet.update_cell(target_row, addr_col + 1, edit_addr)
-                            st.success(f"✅ {edit_name} の情報を更新しました！")
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ 該当する顧客がシートで見つかりませんでした")
-
-                    except Exception as e:
-                        st.error(f"❌ 更新エラー：{e}")
-
-# ── 日報 ──────────────────────────────────────────────────────
-with tab8:
-    st.subheader("📊 日報")
-
-    # 印刷時に Streamlit の UI 要素を非表示にする CSS
-    st.markdown("""
-    <style>
-    @media print {
-        header, footer, section[data-testid="stSidebar"],
-        div[data-testid="stToolbar"], div[data-testid="stDecoration"],
-        .stButton, .stDateInput, .stSelectbox, .block-container > div:first-child {
-            display: none !important;
-        }
-        #nippo-print-area { margin: 0; padding: 0; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    nippo_date = st.date_input(
-        "📅 日付を選択", value=datetime.date.today(), key="nippo_date"
+def customer_picker(key: str, title: str = "お客様名"):
+    ordered = sorted(customers, key=lambda row: (str(row["customer_name"]), str(row["customer_code"])))
+    label_to_customer = {customer_label(row): row for row in ordered}
+    selected_label = st.selectbox(
+        title,
+        options=list(label_to_customer),
+        index=None,
+        placeholder="名前を1文字入力すると候補が絞られます",
+        key=key,
+        on_change=clear_pending,
     )
-    nippo_date_str = nippo_date.strftime("%Y-%m-%d")
-    nippo_date_jp  = f"{nippo_date.year}年{nippo_date.month}月{nippo_date.day}日"
+    return label_to_customer.get(selected_label)
 
-    _nippo_col1, _nippo_col2 = st.columns([0.7, 0.3])
-    with _nippo_col2:
-        if st.button("🔄 最新を取得", use_container_width=True, key="refresh_nippo_cache",
-                     help="キャッシュをクリアして最新データを取り直します"):
-            load_delivery_records.clear()
-            st.success("✅ キャッシュをクリアしました")
 
-    # 診断モード：その日のシート上の生データをそのまま表示
-    with st.expander("🔧 診断：シートの生データを見る（バグ調査用）"):
-        if st.button("生データを表示", key="show_raw_records"):
-            load_delivery_records.clear()
-            _all = load_delivery_records()
-            st.write(f"全レコード数: {len(_all)}")
-            if _all:
-                st.write(f"検出キー（ヘッダー）: {list(_all[0].keys())}")
-            _hits = [r for r in _all if str(r.get("日付", "")).strip() == nippo_date_str]
-            st.write(f"{nippo_date_str} のレコード数: {len(_hits)}")
-            if _hits:
-                st.dataframe(_hits)
+def show_customer_card(customer: dict) -> None:
+    rental_badge = "R・レンタル" if customer["is_rental"] else "買取・一般"
+    st.markdown(
+        f"""
+        <div class="customer-card">
+          <div class="customer-name">{customer['customer_name']}</div>
+          <div>コード：<b>{customer['customer_code']}</b>　｜　エリア：<b>{customer['area']}</b>　｜　{rental_badge}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button("📊 日報を表示", use_container_width=True, key="show_nippo"):
-        try:
-            # 不在でない行を抽出（訪問・補給・伝票投函のいずれか）
-            day_records = []
-            for _r in load_delivery_records():
-                if str(_r.get("日付", "")).strip() != nippo_date_str:
-                    continue
-                if str(_r.get("不在", "")).strip() == "✓":
-                    continue
-                try:
-                    _sp = float(_r.get("補給量(L)", 0) or 0)
-                except (ValueError, TypeError):
-                    _sp = 0.0
-                _visited = str(_r.get("訪問済み", "")).strip() == "✓"
-                _rental  = str(_r.get("レンタル伝票投函", "")).strip() == "✓"
-                if _sp > 0 or _rental or _visited:
-                    day_records.append(_r)
 
-            if not day_records:
-                st.info(f"📭 {nippo_date_jp} の配送記録はありません")
-            else:
-                # 合計補給量
-                total_supply = 0.0
-                for r in day_records:
-                    try:
-                        total_supply += float(r.get("補給量(L)", 0) or 0)
-                    except (ValueError, TypeError):
-                        pass
+def monthly_row_for(code: str):
+    return next(
+        (row for row in monthly_history if str(row.get("customer_code")) == str(code)),
+        None,
+    )
 
-                # テーブル行 HTML を組み立てる
-                rows_html = ""
-                for idx, r in enumerate(day_records, 1):
-                    try:
-                        sp = float(r.get("補給量(L)", 0) or 0)
-                    except (ValueError, TypeError):
-                        sp = 0.0
-                    sp_str   = f"{sp:.2f}" if sp > 0 else "―"
-                    rental   = "✓" if str(r.get("レンタル伝票投函", "")).strip() == "✓" else ""
-                    time_str = str(r.get("時間", "")).strip()
 
-                    rows_html += f"""
-                    <tr style="background:white;">
-                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{idx}</td>
-                      <td style="padding:7px 10px;border:1px solid #ccc;">{r.get('顧客コード','')}</td>
-                      <td style="padding:7px 10px;border:1px solid #ccc;font-weight:bold;">{r.get('名前','')}</td>
-                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{time_str}</td>
-                      <td style="text-align:right;padding:7px 10px;border:1px solid #ccc;">{sp_str}</td>
-                      <td style="text-align:center;padding:7px 10px;border:1px solid #ccc;">{rental}</td>
-                    </tr>"""
+def history_for(code: str):
+    rows = [
+        row
+        for row in active_records(deliveries)
+        if str(row.get("customer_code")) == str(code)
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (str(row.get("delivery_date", "")), str(row.get("delivery_time", ""))),
+        reverse=True,
+    )
 
-                nippo_html = f"""
-                <div id="nippo-print-area" style="font-family:'Hiragino Sans','Meiryo',sans-serif;max-width:800px;margin:0 auto;padding:20px;">
-                  <h2 style="text-align:center;border-bottom:3px solid #1f77b4;padding-bottom:10px;color:#1f77b4;">
-                    ⛽ 灯油配送　日報
-                  </h2>
-                  <p style="text-align:right;font-size:16px;margin-bottom:16px;">
-                    <strong>配送日：{nippo_date_jp}</strong>
-                  </p>
-                  <table style="width:100%;border-collapse:collapse;font-size:14px;">
-                    <thead>
-                      <tr style="background:#1f77b4;color:white;">
-                        <th style="padding:8px 10px;border:1px solid #ccc;width:40px;">No.</th>
-                        <th style="padding:8px 10px;border:1px solid #ccc;">顧客コード</th>
-                        <th style="padding:8px 10px;border:1px solid #ccc;">名前</th>
-                        <th style="padding:8px 10px;border:1px solid #ccc;width:80px;">時間</th>
-                        <th style="padding:8px 10px;border:1px solid #ccc;width:110px;">補給量 (L)</th>
-                        <th style="padding:8px 10px;border:1px solid #ccc;width:90px;">レンタル伝票</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows_html}
-                      <tr style="background:#e8f0fe;font-weight:bold;">
-                        <td colspan="4" style="text-align:right;padding:8px 10px;border:1px solid #ccc;">合計</td>
-                        <td style="text-align:right;padding:8px 10px;border:1px solid #ccc;">{total_supply:.2f}</td>
-                        <td style="border:1px solid #ccc;"></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <p style="margin-top:16px;font-size:15px;">
-                    件数：<strong>{len(day_records)} 件</strong>
-                    合計補給量：<strong>{total_supply:.2f} L</strong>　｜　レンタル伝票：<strong>{sum(1 for r in day_records if str(r.get("レンタル伝票投函", "")).strip() == "✓")} 件</strong>
-                  </p>
-                </div>"""
 
-                # components.html() は Markdown を介さず直接 HTML レンダリングするため
-                # インデントによるコードブロック誤解釈が発生しない
-                import streamlit.components.v1 as _components
+def show_monthly_metrics(customer: dict) -> None:
+    row = monthly_row_for(customer["customer_code"])
+    if not row:
+        st.info("この顧客の月次実績は登録されていません。")
+        return
+    month_keys = sorted(
+        (str(key) for key in row if re.fullmatch(r"\d{4}-\d{2}", str(key))),
+    )[-4:]
+    if not month_keys:
+        st.info("この顧客の月次実績は登録されていません。")
+        return
+    cols = st.columns(len(month_keys) + 1)
+    for index, key in enumerate(month_keys):
+        cols[index].metric(key.replace("-", "年", 1) + "月", format_liters(row.get(key)))
+    total = sum(as_float(row.get(key)) or 0 for key in month_keys)
+    cols[-1].metric(f"{len(month_keys)}か月計", f"{total:,.1f}L")
 
-                _full_html = (
-                    "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'>"
-                    "<style>"
-                    "body{font-family:'Hiragino Sans','Meiryo','Yu Gothic',sans-serif;margin:16px;}"
-                    "@media print{.no-print{display:none!important;}}"
-                    "</style></head><body>"
-                    + nippo_html
-                    + "<div class='no-print' style='margin-top:20px;'>"
-                    "<button onclick='window.print()' style='"
-                    "background-color:#1f77b4;color:white;padding:12px 36px;"
-                    "border:none;border-radius:6px;cursor:pointer;"
-                    "font-size:16px;font-weight:bold;'>🖨️ 印刷</button>"
-                    "</div></body></html>"
-                )
 
-                _components.html(
-                    _full_html,
-                    height=max(520, len(day_records) * 46 + 320),
-                    scrolling=True,
-                )
-
-        except Exception as e:
-            st.error(f"❌ 読み込みエラー：{e}")
-
-# ── AIアシスタント ────────────────────────────────────────────
-with tab9:
-    st.subheader("🤖 AIアシスタント")
-    st.caption("配送に関する質問は何でも聞いてください")
-
-    import anthropic as _anthropic
-    import os as _os
-    from collections import defaultdict as _defaultdict
-
-    def build_ai_context(all_data, delivery_records):
-        area_counts = _defaultdict(int)
-        for c in all_data:
-            area_counts[c.get("エリア", "不明")] += 1
-
-        import datetime as _dt
-        _month = _dt.date.today().strftime("%Y-%m")
-        month_records = [r for r in delivery_records if str(r.get("日付","")).startswith(_month)]
-        visited_codes = {str(r.get("顧客コード","")).strip() for r in month_records if str(r.get("訪問済み","")).strip() == "✓"}
-
-        lines = [f"【お客様データ：全{len(all_data)}件】", ""]
-        lines.append("■ エリア別件数")
-        for area, count in area_counts.items():
-            lines.append(f"  {area}：{count}件")
-        lines.append("")
-        lines.append(f"■ 今月（{_month}）の配送状況")
-        lines.append(f"  訪問済み：{len(visited_codes)}件")
-        lines.append(f"  未訪問：{len(all_data) - len(visited_codes)}件")
-        lines.append("")
-        lines.append("■ お客様一覧（顧客コード・名前・住所・エリア）")
-        for c in all_data:
-            code = c.get("顧客コード", "")
-            name = c.get("名前", "")
-            addr = c.get("住所", "")
-            area = c.get("エリア", "")
-            if name or addr:
-                lines.append(f"  [{code}] {name} / {addr} / {area}")
-        return "\n".join(lines)
-
-    def build_ai_system_prompt(context):
-        import datetime as _dt2
-        today = _dt2.date.today().strftime("%Y-%m-%d")
-        return f"""あなたはゆういちさんの灯油配送業務を助けるAIアシスタントです。
-以下の業務知識とお客様データをもとに質問に答えてください。
-回答は短く・わかりやすく・箇条書きで答えてください。
-
-【基本情報】
-- 担当エリア：沖縄県
-- 訪問頻度：月1回
-- 一人で全件まわっている
-
-【燃料残量の目安】
-- 残量20%以下：至急訪問
-- 残量20〜40%：今月中に訪問
-- 残量40%以上：来月でOK
-
-【配送記録の書き込み機能】
-ユーザーが配送内容を入力した場合（例：田中さん36L、101739 36L、スモール農園300L不在など）：
-1. お客様データから該当顧客を検索して特定する
-2. 以下のJSON形式を必ず含めて返す：
-```json
-{{{{
-  "action": "save_delivery",
-  "顧客コード": "顧客コードをここに",
-  "名前": "お客様名をここに",
-  "住所": "住所をここに",
-  "エリア": "エリア名をここに",
-  "補給量": 0,
-  "不在": false,
-  "伝票投函": false,
-  "日付": "{today}"
-}}}}
-```
-
-3. JSONの後に「上記の内容でスプレッドシートに保存しますか？」と必ず聞く
-4. はい・OK・保存などと答えた場合のみ保存する
-
-{context}"""
-
-    ai_shortcut = None
-
-    # 🎤 音声入力（ブラウザ標準のSpeech Recognitionを使用、無料・APIキー不要）
-    try:
-        from streamlit_mic_recorder import speech_to_text
-        st.markdown("**🎤 音声で配送内容を入力**")
-        st.caption("ボタンを押して話すだけ。例：「鈴木愛さんに50リットル」「101187 不在」")
-        voice_text = speech_to_text(
-            language="ja-JP",
-            start_prompt="🎤 話す",
-            stop_prompt="⏹ 停止",
-            use_container_width=True,
-            just_once=True,
-            key="ai_voice_input",
+def dataframe_for_records(rows: list[dict]) -> pd.DataFrame:
+    display = []
+    for row in rows:
+        display.append(
+            {
+                "日付": row.get("delivery_date", ""),
+                "時刻": row.get("delivery_time", ""),
+                "お客様": row.get("customer_name", ""),
+                "コード": row.get("customer_code", ""),
+                "エリア": row.get("area", ""),
+                "結果": row.get("visit_status", ""),
+                "灯油(L)": as_float(row.get("liters")) or 0.0,
+                "伝票": row.get("rental_slip_status", ""),
+                "備考": row.get("note", ""),
+            }
         )
-        if voice_text:
-            # 一度処理したら ai_messages に積むので、同じ文字列が何度も
-            # ai_shortcut として再利用されないよう session_state で重複防止
-            last_voice = st.session_state.get("last_voice_text", "")
-            if voice_text != last_voice:
-                st.session_state.last_voice_text = voice_text
-                ai_shortcut = voice_text
-                st.success(f"🎤 認識：「{voice_text}」")
-    except ImportError:
-        st.caption("⚠️ 音声入力ライブラリがロードされていません（クラウド再デプロイ待ち）")
-    except Exception as _voice_err:
-        st.caption(f"⚠️ 音声入力エラー：{_voice_err}")
+    return pd.DataFrame(display)
 
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📊 今月の状況", key="ai_month"):
-            ai_shortcut = "今月の配送状況を教えてください"
-    with col2:
-        if st.button("📍 エリア件数", key="ai_area"):
-            ai_shortcut = "エリアごとの件数を教えてください"
 
-    if "ai_messages" not in st.session_state:
-        st.session_state.ai_messages = []
+now = datetime.now(JST)
+st.title("🛢️ 灯油配送台帳")
 
-    if ai_shortcut:
-        st.session_state.ai_messages.append({"role": "user", "content": ai_shortcut})
-
-    for message in st.session_state.ai_messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("AIに質問する...", key="ai_chat_input"):
-        st.session_state.ai_messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-    if st.session_state.ai_messages and st.session_state.ai_messages[-1]["role"] == "user":
-        last_user_msg = st.session_state.ai_messages[-1]["content"]
-
-        # 「はい」系の返答かつ直前のAIメッセージにJSONがある場合→保存処理
-        yes_words = ["はい", "yes", "ok", "OK", "保存", "お願い", "いいです", "よろしく"]
-        is_yes = any(w in last_user_msg for w in yes_words)
-
-        pending_json = st.session_state.get("pending_delivery", None)
-
-        if is_yes and pending_json:
-            with st.chat_message("assistant"):
-                with st.spinner("スプレッドシートに保存中..."):
-                    try:
-                        import datetime as _dt3
-                        record_sheet = get_or_create_sheet("配送記録", [
-                            "日付","エリア","顧客コード","名前","住所",
-                            "訪問済み","補給量(L)","不在","レンタル伝票投函"
-                        ])
-
-                        today_str = _dt3.date.today().strftime("%Y-%m-%d")
-                        supply = float(pending_json.get("補給量", 0) or 0)
-                        absent = pending_json.get("不在", False)
-                        rental = pending_json.get("伝票投函", False)
-
-                        row = [
-                            today_str,
-                            pending_json.get("エリア", ""),
-                            pending_json.get("顧客コード", ""),
-                            pending_json.get("名前", ""),
-                            pending_json.get("住所", ""),
-                            "✓" if not absent else "",
-                            supply if supply > 0 else "",
-                            "✓" if absent else "",
-                            "✓" if rental else "",
-                        ]
-                        # ✅ append_row のズレバグを回避する安全な書き込み方式
-                        safe_append_rows(record_sheet, [row], num_cols=9)
-                        load_delivery_records.clear()
-                        st.session_state.pending_delivery = None
-
-                        reply = f"✅ **保存しました！**\n\n{pending_json.get('名前','')}さんの配送記録をスプレッドシートに記録しました。"
-                        st.markdown(reply)
-                        st.session_state.ai_messages.append({"role": "assistant", "content": reply})
-                    except Exception as e:
-                        reply = f"❌ 保存エラー：{e}"
-                        st.markdown(reply)
-                        st.session_state.ai_messages.append({"role": "assistant", "content": reply})
-        else:
-            with st.chat_message("assistant"):
-                with st.spinner("考え中..."):
-                    try:
-                        api_key = st.secrets["ANTHROPIC_API_KEY"]
-                    except:
-                        api_key = _os.getenv("ANTHROPIC_API_KEY")
-                    ai_client = _anthropic.Anthropic(api_key=api_key)
-                    delivery_records = load_delivery_records()
-                    context = build_ai_context(data, delivery_records)
-                    response = ai_client.messages.create(
-                        model="claude-haiku-4-5",
-                        max_tokens=1024,
-                        system=build_ai_system_prompt(context),
-                        messages=st.session_state.ai_messages
-                    )
-                    reply = response.content[0].text
-                    st.markdown(reply)
-                    st.session_state.ai_messages.append({"role": "assistant", "content": reply})
-
-                    # JSONが含まれている場合はpending_deliveryに保存
-                    import json as _json
-                    import re as _re
-                    json_match = _re.search(r'```json\s*(\{.*?\})\s*```', reply, _re.DOTALL)
-                    if json_match:
-                        try:
-                            parsed = _json.loads(json_match.group(1))
-                            if parsed.get("action") == "save_delivery":
-                                st.session_state.pending_delivery = parsed
-                        except Exception:
-                            pass
-
-    if st.button("🔄 会話リセット", key="ai_reset"):
-        st.session_state.ai_messages = []
+with st.sidebar:
+    page = st.radio(
+        "メニュー",
+        ["配送入力", "顧客検索", "本日の記録", "月間チェック", "接続・使い方"],
+    )
+    st.caption(repo.mode_label)
+    if st.button("ログアウト", width="stretch"):
+        st.session_state["authenticated"] = False
+        st.rerun()
+    if st.button("データを再読込", width="stretch"):
+        refresh_data()
         st.rerun()
 
-# ── タスク管理 ─────────────────────────────────────────────────
-with tab10:
-    st.subheader("✅ タスク管理")
-    st.caption("やることリストをGoogle Sheetsに保存します")
 
-    TASKS_HEADERS = ["日付", "タスク", "完了"]
+if page == "配送入力":
+    st.subheader("配送を記録")
+    st.caption("入力欄をタップし、お客様名を一文字入力してください。名前・コード・エリア・R区分が候補に表示されます。")
+    customer = customer_picker("delivery_customer")
 
-    # 新規タスク追加フォーム
-    with st.form("new_task_form", clear_on_submit=True):
-        new_task = st.text_input("新しいタスク", key="new_task_input")
-        add_btn = st.form_submit_button("➕ 追加", use_container_width=True)
-        if add_btn and new_task.strip():
-            try:
-                sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
-                today = datetime.date.today().strftime("%Y-%m-%d")
-                # ✅ append_row のズレバグを回避する安全な書き込み方式
-                safe_append_rows(sheet, [[today, new_task.strip(), ""]], num_cols=3)
-                load_sheet_data.clear()
-                st.success("✅ タスクを追加しました")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ 追加エラー：{e}")
+    if customer:
+        show_customer_card(customer)
+        show_monthly_metrics(customer)
 
-    st.markdown("---")
+        delivery_date = st.date_input("配送日", value=now.date(), key="delivery_date")
+        delivery_time = st.time_input(
+            "時刻", value=now.time().replace(second=0, microsecond=0), key="delivery_time"
+        )
+        already_counted = customer["is_rental"] and slip_already_counted(
+            deliveries, customer["customer_code"], delivery_date
+        )
 
-    # タスク一覧表示
-    tasks = load_sheet_data("タスク")
+        with st.form("delivery_form", clear_on_submit=False):
+            visit_status = st.radio("訪問結果", VISIT_STATUSES, horizontal=True)
+            liters = st.number_input(
+                "灯油量（L）", min_value=0.0, max_value=2000.0, value=0.0, step=0.2, format="%.1f"
+            )
+            if customer["is_rental"]:
+                default_index = 1 if already_counted else 0
+                slip_status = st.radio(
+                    "レンタル伝票",
+                    RENTAL_SLIP_STATUSES,
+                    index=default_index,
+                    horizontal=True,
+                )
+                if already_counted:
+                    st.caption("このお客様は今月すでに伝票計上済みです。")
+            else:
+                slip_status = NON_RENTAL_SLIP_STATUS
+                st.caption("レンタル伝票：対象外")
+            note = st.text_area("備考（任意）", placeholder="ボイラーの状態、次回の注意点など")
+            review = st.form_submit_button("入力内容を確認", type="primary", width="stretch")
 
-    if not tasks:
-        st.info("📭 タスクはまだありません。上のフォームから追加してください。")
-    else:
-        # 未完了を上、完了を下に
-        pending_tasks = [(i, t) for i, t in enumerate(tasks) if str(t.get("完了", "")).strip() != "✓"]
-        done_tasks    = [(i, t) for i, t in enumerate(tasks) if str(t.get("完了", "")).strip() == "✓"]
+        if review:
+            pending = {
+                "record_id": str(uuid.uuid4()),
+                "delivery_date": delivery_date.isoformat(),
+                "delivery_time": delivery_time.strftime("%H:%M"),
+                "customer_code": customer["customer_code"],
+                "customer_name": customer["customer_name"],
+                "area": customer["area"],
+                "is_rental": customer["is_rental"],
+                "visit_status": visit_status,
+                "liters": round(float(liters), 1),
+                "rental_slip_status": slip_status,
+                "note": note.strip(),
+                "created_at": datetime.now(JST).isoformat(timespec="seconds"),
+                "updated_at": datetime.now(JST).isoformat(timespec="seconds"),
+                "is_deleted": False,
+            }
+            errors = validate_delivery(pending)
+            if errors:
+                for error in errors:
+                    st.error(error)
+            else:
+                st.session_state["pending_delivery"] = pending
 
-        st.markdown(f"**📋 未完了：{len(pending_tasks)}件　／　✅ 完了：{len(done_tasks)}件**")
-        st.markdown("---")
-
-        for original_i, task in pending_tasks + done_tasks:
-            row_idx = original_i + 2  # ヘッダー行の次が2行目
-            done_now = str(task.get("完了", "")).strip() == "✓"
-            task_text = task.get("タスク", "")
-            task_date = task.get("日付", "")
-
-            col1, col2, col3 = st.columns([0.1, 0.7, 0.2])
-            with col1:
-                done = st.checkbox(" ", value=done_now, key=f"task_done_{original_i}", label_visibility="collapsed")
-                if done != done_now:
-                    try:
-                        sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
-                        sheet.update_cell(row_idx, 3, "✓" if done else "")
-                        load_sheet_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ 更新エラー：{e}")
-            with col2:
-                if done_now:
-                    st.markdown(f"~~{task_text}~~")
-                else:
-                    st.markdown(f"**{task_text}**")
-                st.caption(f"📅 {task_date}")
-            with col3:
-                if st.button("🗑️ 削除", key=f"task_del_{original_i}"):
-                    try:
-                        sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
-                        sheet.delete_rows(row_idx)
-                        load_sheet_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ 削除エラー：{e}")
+        pending = st.session_state.get("pending_delivery")
+        if pending:
             st.divider()
-
-        # 完了済みを一括削除
-        if done_tasks:
-            if st.button("🧹 完了済みを一括削除", key="clear_done"):
+            st.subheader("保存前の確認")
+            if pending["is_rental"] and pending["rental_slip_status"] == "未計上":
+                st.warning("レンタル伝票が未計上です。内容を確認してください。")
+            st.write(
+                f"**{pending['customer_name']}**（{pending['customer_code']}・{pending['area']}）  "
+                f"\n{pending['delivery_date']} {pending['delivery_time']}／{pending['visit_status']}／"
+                f"{pending['liters']:.1f}L／伝票：{pending['rental_slip_status']}"
+            )
+            confirm_col, cancel_col = st.columns(2)
+            if confirm_col.button("確定して保存", type="primary", width="stretch"):
                 try:
-                    sheet = get_or_create_sheet("タスク", TASKS_HEADERS)
-                    # 下から削除（インデックスがズレないように）
-                    for original_i, _ in sorted(done_tasks, reverse=True):
-                        sheet.delete_rows(original_i + 2)
-                    load_sheet_data.clear()
-                    st.success(f"✅ {len(done_tasks)}件の完了済みタスクを削除しました")
+                    repo.append_delivery(pending)
+                    clear_pending()
+                    refresh_data()
+                    st.success("配送記録を保存しました。")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 削除エラー：{e}")
+                except Exception as exc:
+                    st.error(f"保存できませんでした。接続を確認してください。詳細: {exc}")
+            if cancel_col.button("入力へ戻る", width="stretch"):
+                clear_pending()
+                st.rerun()
+    else:
+        st.info("まずお客様名を入力して、候補から選んでください。")
+
+
+elif page == "顧客検索":
+    st.subheader("顧客を検索")
+    customer = customer_picker("search_customer", "名前・コード・エリアで検索")
+    if customer:
+        show_customer_card(customer)
+        show_monthly_metrics(customer)
+        rows = history_for(customer["customer_code"])
+        st.markdown("#### アプリ登録後の配送履歴")
+        if rows:
+            st.dataframe(dataframe_for_records(rows), hide_index=True, width="stretch")
+        else:
+            st.info("アプリで登録した配送履歴はまだありません。")
+
+
+elif page == "本日の記録":
+    st.subheader("日ごとの記録")
+    selected_date = st.date_input("表示する日", value=now.date(), key="daily_date")
+    rows = [
+        row
+        for row in active_records(deliveries)
+        if str(row.get("delivery_date", "")) == selected_date.isoformat()
+    ]
+    rows.sort(key=lambda row: str(row.get("delivery_time", "")))
+    summary = summarize(rows)
+    metrics = st.columns(4)
+    metrics[0].metric("訪問", f"{summary['visits']}軒")
+    metrics[1].metric("補給", f"{summary['supplied']}軒")
+    metrics[2].metric("灯油", f"{summary['liters']:,.1f}L")
+    metrics[3].metric("伝票計上", f"{summary['slips']}件")
+    if summary["rental_warnings"]:
+        st.warning(f"レンタル伝票の未計上が{summary['rental_warnings']}件あります。")
+    if rows:
+        st.dataframe(dataframe_for_records(rows), hide_index=True, width="stretch")
+        text_summary = (
+            f"{selected_date.isoformat()}　訪問{summary['visits']}軒（補給{summary['supplied']}軒）／"
+            f"灯油{summary['liters']:.1f}L／レンタル伝票{summary['slips']}件"
+        )
+        st.code(text_summary, language=None)
+
+        options = {
+            f"{row.get('delivery_time','')}｜{row.get('customer_name','')}｜{format_liters(row.get('liters'))}": row
+            for row in rows
+        }
+        with st.expander("記録を修正する"):
+            selected_label = st.selectbox("修正する記録", list(options), index=None)
+            selected = options.get(selected_label)
+            if selected:
+                with st.form("edit_record"):
+                    edited_status = st.selectbox(
+                        "訪問結果", VISIT_STATUSES, index=VISIT_STATUSES.index(selected.get("visit_status"))
+                    )
+                    edited_liters = st.number_input(
+                        "灯油量（L）", min_value=0.0, max_value=2000.0,
+                        value=as_float(selected.get("liters")) or 0.0, step=0.2, format="%.1f"
+                    )
+                    if as_bool(selected.get("is_rental")):
+                        current_slip = selected.get("rental_slip_status")
+                        slip_index = RENTAL_SLIP_STATUSES.index(current_slip) if current_slip in RENTAL_SLIP_STATUSES else 0
+                        edited_slip = st.selectbox("伝票状況", RENTAL_SLIP_STATUSES, index=slip_index)
+                    else:
+                        edited_slip = NON_RENTAL_SLIP_STATUS
+                    edited_note = st.text_area("備考", value=str(selected.get("note", "")))
+                    save_edit = st.form_submit_button("修正を保存", type="primary")
+                if save_edit:
+                    updated = {
+                        **selected,
+                        "visit_status": edited_status,
+                        "liters": round(float(edited_liters), 1),
+                        "rental_slip_status": edited_slip,
+                        "note": edited_note.strip(),
+                        "updated_at": datetime.now(JST).isoformat(timespec="seconds"),
+                    }
+                    errors = validate_delivery(updated)
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        try:
+                            repo.update_delivery(str(selected["record_id"]), updated)
+                            refresh_data()
+                            st.success("記録を修正しました。")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"修正できませんでした。詳細: {exc}")
+    else:
+        st.info("この日の記録はありません。")
+
+
+elif page == "月間チェック":
+    st.subheader("月間チェック")
+    history_months = {
+        str(key)
+        for row in monthly_history
+        for key in row
+        if re.fullmatch(r"\d{4}-\d{2}", str(key))
+    }
+    available_months = sorted(
+        history_months | {month_key(now)}, reverse=True
+    )
+    selected_month = st.selectbox("対象月", available_months)
+    app_rows = month_records(deliveries, selected_month)
+
+    if selected_month in history_months:
+        month_data = []
+        for row in monthly_history:
+            value = as_float(row.get(selected_month))
+            if value is not None:
+                month_data.append(
+                    {
+                        "お客様": row.get("customer_name", ""),
+                        "コード": row.get("customer_code", ""),
+                        "エリア": row.get("area", ""),
+                        "R": "R" if as_bool(row.get("is_rental")) else "",
+                        "灯油(L)": value,
+                    }
+                )
+        total = sum(float(row["灯油(L)"]) for row in month_data)
+        st.metric("確定済み月間灯油量", f"{total:,.1f}L")
+        st.dataframe(pd.DataFrame(month_data), hide_index=True, width="stretch")
+        st.caption("取込済みの月別集計です。日ごとの伝票状況はこの表には含まれません。")
+    else:
+        summary = summarize(app_rows)
+        metrics = st.columns(3)
+        metrics[0].metric("訪問", f"{summary['visits']}軒")
+        metrics[1].metric("灯油", f"{summary['liters']:,.1f}L")
+        metrics[2].metric("伝票計上", f"{summary['slips']}件")
+        area_rows = area_summary(app_rows)
+        if area_rows:
+            st.markdown("#### エリア別")
+            st.dataframe(pd.DataFrame(area_rows), hide_index=True, width="stretch")
+
+        counted_codes = {
+            str(row.get("customer_code"))
+            for row in app_rows
+            if row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}
+        }
+        missing = [
+            row for row in customers if row["is_rental"] and row["customer_code"] not in counted_codes
+        ]
+        st.markdown(f"#### 今月まだ伝票計上を確認できないR顧客：{len(missing)}件")
+        st.caption("アプリに登録された記録だけで判定します。月途中は未訪問の顧客も含まれます。")
+        if missing:
+            missing_df = pd.DataFrame(
+                [
+                    {"お客様": row["customer_name"], "コード": row["customer_code"], "エリア": row["area"]}
+                    for row in missing
+                ]
+            )
+            st.dataframe(missing_df, hide_index=True, width="stretch")
+
+    if app_rows:
+        csv_buffer = io.StringIO()
+        dataframe_for_records(app_rows).to_csv(csv_buffer, index=False)
+        st.download_button(
+            "この月のアプリ記録をCSV保存",
+            csv_buffer.getvalue().encode("utf-8-sig"),
+            file_name=f"delivery_{selected_month}.csv",
+            mime="text/csv",
+        )
+
+
+else:
+    st.subheader("接続・使い方")
+    st.write(f"現在の動作：**{repo.mode_label}**")
+    st.write(f"顧客マスター：**{len(customers)}件**／レンタル顧客：**{sum(row['is_rental'] for row in customers)}件**")
+    st.markdown(
+        """
+        1. 「配送入力」を開きます。
+        2. お客様名の入力欄をタップします。
+        3. 名前を一文字入力すると、候補が絞り込まれます。
+        4. 名前・コード・エリア・R区分を見て選択します。
+        5. 数量と伝票状況を入力し、確認後に保存します。
+        """
+    )
+    st.markdown(
+        '<div class="privacy-note">このアプリのデータ項目に住所はありません。住所入りの既存シートにも接続しません。</div>',
+        unsafe_allow_html=True,
+    )

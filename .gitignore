@@ -1,5 +1,12 @@
-credentials.json
-.streamlit/secrets.toml
+.venv/
 __pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+*.tmp
+*.py[cod]
+credentials.json
+data/
+data_raw/
+outputs/
 配送記録_backup_*.json
 _archive/

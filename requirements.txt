@@ -1,6 +1,4 @@
-gspread
-google-auth
-streamlit
-anthropic
-python-dotenv
-streamlit-mic-recorder
+streamlit>=1.63,<2
+pandas>=2.2,<3
+gspread>=6,<7
+google-auth>=2.29,<3
