@@ -23,8 +23,6 @@ from app_core import (
     format_liters,
     month_key,
     month_records,
-    monthly_rental_slip_pending,
-    monthly_unvisited_customers,
     slip_already_counted,
     summarize,
     validate_delivery,
@@ -181,6 +179,57 @@ def history_for(code: str):
         key=lambda row: (str(row.get("delivery_date", "")), str(row.get("delivery_time", ""))),
         reverse=True,
     )
+
+
+def monthly_unvisited_view(customers: list[dict], records: list[dict]) -> list[dict]:
+    rows = active_records(records)
+    visited_codes = {
+        str(row.get("customer_code", "")).strip()
+        for row in rows
+        if row.get("visit_status") in {"補給あり", "訪問・補給なし"}
+    }
+    skipped_dates: dict[str, list[str]] = {}
+    for row in rows:
+        if row.get("visit_status") == "今回は飛ばした":
+            code = str(row.get("customer_code", "")).strip()
+            skipped_dates.setdefault(code, []).append(str(row.get("delivery_date", "")))
+
+    result = []
+    for customer in customers:
+        code = str(customer.get("customer_code", "")).strip()
+        if code in visited_codes:
+            continue
+        item = dict(customer)
+        item["last_skipped_date"] = max(skipped_dates.get(code, []), default="")
+        result.append(item)
+    return sorted(result, key=lambda row: (str(row.get("area", "")), str(row.get("customer_name", ""))))
+
+
+def monthly_rental_pending_view(customers: list[dict], records: list[dict]) -> list[dict]:
+    rows = active_records(records)
+    actual_visits: dict[str, list[dict]] = {}
+    counted_codes = set()
+    for row in rows:
+        code = str(row.get("customer_code", "")).strip()
+        if row.get("visit_status") in {"補給あり", "訪問・補給なし"}:
+            actual_visits.setdefault(code, []).append(row)
+        if row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}:
+            counted_codes.add(code)
+
+    result = []
+    for customer in customers:
+        code = str(customer.get("customer_code", "")).strip()
+        if not customer.get("is_rental") or code not in actual_visits or code in counted_codes:
+            continue
+        latest = max(
+            actual_visits[code],
+            key=lambda row: (str(row.get("delivery_date", "")), str(row.get("delivery_time", ""))),
+        )
+        item = dict(customer)
+        item["last_visit_date"] = str(latest.get("delivery_date", ""))
+        item["last_visit_status"] = str(latest.get("visit_status", ""))
+        result.append(item)
+    return sorted(result, key=lambda row: (str(row.get("area", "")), str(row.get("customer_name", ""))))
 
 
 def show_monthly_metrics(customer: dict) -> None:
@@ -458,8 +507,8 @@ elif page == "月間チェック":
             st.markdown("#### エリア別")
             st.dataframe(pd.DataFrame(area_rows), hide_index=True, width="stretch")
 
-        unvisited = monthly_unvisited_customers(customers, app_rows)
-        rental_pending = monthly_rental_slip_pending(customers, app_rows)
+        unvisited = monthly_unvisited_view(customers, app_rows)
+        rental_pending = monthly_rental_pending_view(customers, app_rows)
 
         st.divider()
         status_metrics = st.columns(2)
