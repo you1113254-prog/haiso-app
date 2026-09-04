@@ -39,6 +39,7 @@ class Repository(Protocol):
 
     def load_customers(self) -> list[dict[str, Any]]: ...
     def load_monthly_history(self) -> list[dict[str, Any]]: ...
+    def load_historical_refills(self) -> list[dict[str, Any]]: ...
     def load_deliveries(self) -> list[dict[str, Any]]: ...
     def load_tank_inventory(self) -> list[dict[str, Any]]: ...
     def append_delivery(self, record: dict[str, Any]) -> None: ...
@@ -81,6 +82,9 @@ class LocalCsvRepository:
 
     def load_monthly_history(self) -> list[dict[str, Any]]:
         return self._read("monthly_history.csv")
+
+    def load_historical_refills(self) -> list[dict[str, Any]]:
+        return self._read("historical_refills.csv")
 
     def load_deliveries(self) -> list[dict[str, Any]]:
         return self._read("delivery_records.csv")
@@ -127,6 +131,7 @@ class GoogleSheetsRepository:
 
         client = gspread.service_account_from_dict(service_account)
         self.book = client.open_by_key(spreadsheet_id)
+        self._worksheet_not_found = gspread.WorksheetNotFound
 
     def _records(self, sheet_name: str) -> list[dict[str, Any]]:
         worksheet = self.book.worksheet(sheet_name)
@@ -143,6 +148,12 @@ class GoogleSheetsRepository:
 
     def load_monthly_history(self) -> list[dict[str, Any]]:
         return self._records("月次実績")
+
+    def load_historical_refills(self) -> list[dict[str, Any]]:
+        try:
+            return self._records("過去補給日")
+        except self._worksheet_not_found:
+            return []
 
     def load_deliveries(self) -> list[dict[str, Any]]:
         return [

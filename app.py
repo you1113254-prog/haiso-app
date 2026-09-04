@@ -119,6 +119,7 @@ except Exception:
 def refresh_data() -> None:
     st.session_state["customers"] = repo.load_customers()
     st.session_state["monthly_history"] = repo.load_monthly_history()
+    st.session_state["historical_refills"] = repo.load_historical_refills()
     st.session_state["deliveries"] = repo.load_deliveries()
     st.session_state["tank_inventory"] = repo.load_tank_inventory()
 
@@ -128,6 +129,7 @@ if "customers" not in st.session_state:
 
 customers = [row for row in st.session_state["customers"] if row.get("is_active", True)]
 monthly_history = st.session_state["monthly_history"]
+historical_refills = st.session_state["historical_refills"]
 deliveries = st.session_state["deliveries"]
 tank_inventory = st.session_state["tank_inventory"]
 
@@ -259,7 +261,9 @@ def show_monthly_metrics(customer: dict) -> None:
     total = sum(as_float(row.get(key)) or 0 for key in month_keys)
     cols[-1].metric(f"{len(month_keys)}か月計", f"{total:,.1f}L")
 
-    dated_refills = refill_timeline(deliveries, customer["customer_code"])
+    dated_refills = refill_timeline(
+        [*historical_refills, *deliveries], customer["customer_code"]
+    )
     dates_by_month: dict[str, list[str]] = {}
     for refill in dated_refills:
         key = refill["delivery_date"].strftime("%Y-%m")
@@ -276,7 +280,9 @@ def show_monthly_metrics(customer: dict) -> None:
 
 
 def show_refill_cycle(customer: dict) -> None:
-    timeline = refill_timeline(deliveries, customer["customer_code"])
+    timeline = refill_timeline(
+        [*historical_refills, *deliveries], customer["customer_code"]
+    )
     summary = refill_cycle_summary(timeline, now.date())
     st.markdown("#### 補給サイクル")
     metrics = st.columns(4)
@@ -293,7 +299,11 @@ def show_refill_cycle(customer: dict) -> None:
         history_rows = [
             {
                 "補給日": row["delivery_date"].strftime("%Y/%m/%d"),
-                "補給量": f"{row['liters']:.1f}L",
+                "補給量": (
+                    f"{row['liters']:.1f}L"
+                    if row["liters"] is not None
+                    else "月別合計を参照"
+                ),
                 "前回から": (
                     f"{row['days_since_previous']}日"
                     if row["days_since_previous"] is not None
