@@ -213,7 +213,10 @@ def monthly_rental_pending_view(customers: list[dict], records: list[dict]) -> l
         code = str(row.get("customer_code", "")).strip()
         if row.get("visit_status") in {"補給あり", "訪問・補給なし"}:
             actual_visits.setdefault(code, []).append(row)
-        if row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}:
+        if (
+            row.get("visit_status") in {"補給あり", "訪問・補給なし"}
+            and row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}
+        ):
             counted_codes.add(code)
 
     result = []
