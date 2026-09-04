@@ -144,6 +144,76 @@ def month_records(records: Iterable[dict[str, Any]], selected_month: str) -> lis
     ]
 
 
+def monthly_unvisited_customers(
+    customers: Iterable[dict[str, Any]], records: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows = active_records(records)
+    visited_codes = {
+        str(row.get("customer_code", "")).strip()
+        for row in rows
+        if row.get("visit_status") in {"補給あり", "訪問・補給なし"}
+    }
+    skipped_dates: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        if row.get("visit_status") != "今回は飛ばした":
+            continue
+        code = str(row.get("customer_code", "")).strip()
+        skipped_dates[code].append(str(row.get("delivery_date", "")))
+
+    result = []
+    for customer in customers:
+        code = str(customer.get("customer_code", "")).strip()
+        if not as_bool(customer.get("is_active", True)) or code in visited_codes:
+            continue
+        item = dict(customer)
+        item["last_skipped_date"] = max(skipped_dates.get(code, []), default="")
+        result.append(item)
+    return sorted(
+        result,
+        key=lambda row: (str(row.get("area", "")), str(row.get("customer_name", ""))),
+    )
+
+
+def monthly_rental_slip_pending(
+    customers: Iterable[dict[str, Any]], records: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows = active_records(records)
+    actual_visits: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    counted_codes: set[str] = set()
+    for row in rows:
+        code = str(row.get("customer_code", "")).strip()
+        if row.get("visit_status") in {"補給あり", "訪問・補給なし"}:
+            actual_visits[code].append(row)
+        if row.get("rental_slip_status") in {"計上済み", "今月すでに計上済み"}:
+            counted_codes.add(code)
+
+    result = []
+    for customer in customers:
+        code = str(customer.get("customer_code", "")).strip()
+        if (
+            not as_bool(customer.get("is_active", True))
+            or not as_bool(customer.get("is_rental"))
+            or code not in actual_visits
+            or code in counted_codes
+        ):
+            continue
+        latest = max(
+            actual_visits[code],
+            key=lambda row: (
+                str(row.get("delivery_date", "")),
+                str(row.get("delivery_time", "")),
+            ),
+        )
+        item = dict(customer)
+        item["last_visit_date"] = str(latest.get("delivery_date", ""))
+        item["last_visit_status"] = str(latest.get("visit_status", ""))
+        result.append(item)
+    return sorted(
+        result,
+        key=lambda row: (str(row.get("area", "")), str(row.get("customer_name", ""))),
+    )
+
+
 def format_liters(value: Any) -> str:
     number = as_float(value)
     if number is None:
