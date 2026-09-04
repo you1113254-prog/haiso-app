@@ -193,20 +193,24 @@ def monthly_rental_slip_pending(
         if (
             not as_bool(customer.get("is_active", True))
             or not as_bool(customer.get("is_rental"))
-            or code not in actual_visits
             or code in counted_codes
         ):
             continue
-        latest = max(
-            actual_visits[code],
-            key=lambda row: (
-                str(row.get("delivery_date", "")),
-                str(row.get("delivery_time", "")),
-            ),
-        )
         item = dict(customer)
-        item["last_visit_date"] = str(latest.get("delivery_date", ""))
-        item["last_visit_status"] = str(latest.get("visit_status", ""))
+        visits = actual_visits.get(code, [])
+        if visits:
+            latest = max(
+                visits,
+                key=lambda row: (
+                    str(row.get("delivery_date", "")),
+                    str(row.get("delivery_time", "")),
+                ),
+            )
+            item["last_visit_date"] = str(latest.get("delivery_date", ""))
+            item["last_visit_status"] = str(latest.get("visit_status", ""))
+        else:
+            item["last_visit_date"] = ""
+            item["last_visit_status"] = "未訪問"
         result.append(item)
     return sorted(
         result,

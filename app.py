@@ -219,15 +219,20 @@ def monthly_rental_pending_view(customers: list[dict], records: list[dict]) -> l
     result = []
     for customer in customers:
         code = str(customer.get("customer_code", "")).strip()
-        if not customer.get("is_rental") or code not in actual_visits or code in counted_codes:
+        if not customer.get("is_rental") or code in counted_codes:
             continue
-        latest = max(
-            actual_visits[code],
-            key=lambda row: (str(row.get("delivery_date", "")), str(row.get("delivery_time", ""))),
-        )
         item = dict(customer)
-        item["last_visit_date"] = str(latest.get("delivery_date", ""))
-        item["last_visit_status"] = str(latest.get("visit_status", ""))
+        visits = actual_visits.get(code, [])
+        if visits:
+            latest = max(
+                visits,
+                key=lambda row: (str(row.get("delivery_date", "")), str(row.get("delivery_time", ""))),
+            )
+            item["last_visit_date"] = str(latest.get("delivery_date", ""))
+            item["last_visit_status"] = str(latest.get("visit_status", ""))
+        else:
+            item["last_visit_date"] = ""
+            item["last_visit_status"] = "未訪問"
         result.append(item)
     return sorted(result, key=lambda row: (str(row.get("area", "")), str(row.get("customer_name", ""))))
 
@@ -555,8 +560,9 @@ elif page == "月間チェック":
 
         with rental_tab:
             st.caption(
-                "今月訪問済みのR顧客のうち、伝票が「計上済み」または"
+                "全R顧客のうち、今月の伝票が「計上済み」または"
                 "「今月すでに計上済み」になっていないお客様です。"
+                "月初は全R顧客が表示され、計上確認ごとに減って0件で完了です。"
             )
             st.write(f"表示：{len(rental_pending_view)}件")
             if rental_pending_view:
@@ -568,7 +574,7 @@ elif page == "月間チェック":
                                 "コード": row["customer_code"],
                                 "エリア": row["area"],
                                 "最終訪問日": row.get("last_visit_date", ""),
-                                "訪問結果": row.get("last_visit_status", ""),
+                                "今月の状況": row.get("last_visit_status", ""),
                             }
                             for row in rental_pending_view
                         ]
