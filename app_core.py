@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Iterable
 
 
@@ -24,6 +24,14 @@ def as_float(value: Any) -> float | None:
         return float(str(value).replace(",", ""))
     except (ValueError, InvalidOperation):
         return None
+
+
+def rounded_meter(value: Any) -> int | None:
+    """Round a non-empty meter value to an integer using ordinary half-up rounding."""
+    number = as_float(value)
+    if number is None:
+        return None
+    return int(Decimal(str(number)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def customer_label(customer: dict[str, Any]) -> str:
