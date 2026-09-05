@@ -20,8 +20,17 @@ def as_bool(value: Any) -> bool:
 def as_float(value: Any) -> float | None:
     if value is None or str(value).strip() == "":
         return None
+    normalized = (
+        str(value)
+        .strip()
+        .replace(",", "")
+        .replace("Ｌ", "L")
+        .replace("ℓ", "L")
+    )
+    if normalized.lower().endswith("l"):
+        normalized = normalized[:-1].strip()
     try:
-        return float(str(value).replace(",", ""))
+        return float(normalized)
     except (ValueError, InvalidOperation):
         return None
 
