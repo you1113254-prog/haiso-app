@@ -102,7 +102,9 @@ def require_login() -> None:
 require_login()
 
 
-def build_repository():
+@st.cache_resource
+def build_repository(repository_schema_version: int):
+    del repository_schema_version
     try:
         spreadsheet_id = str(st.secrets["spreadsheet_id"])
         service_account = dict(st.secrets["gcp_service_account"])
@@ -121,7 +123,7 @@ def build_repository():
 
 
 try:
-    repo = build_repository()
+    repo = build_repository(2)
 except Exception:
     st.error("Google Sheetsへ接続できません。管理者へ接続設定の確認を依頼してください。")
     st.stop()
@@ -139,7 +141,13 @@ if (
     "customers" not in st.session_state
     or "historical_refills" not in st.session_state
 ):
-    refresh_data()
+    try:
+        refresh_data()
+    except Exception:
+        st.error("Google Sheetsが一時的に混み合っています。少し待ってから再試行してください。")
+        if st.button("データ読込を再試行", type="primary"):
+            st.rerun()
+        st.stop()
 
 customers = [row for row in st.session_state["customers"] if row.get("is_active", True)]
 monthly_history = st.session_state["monthly_history"]
