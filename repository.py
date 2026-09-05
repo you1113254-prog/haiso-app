@@ -33,7 +33,14 @@ DELIVERY_HEADERS = [
     "updated_at",
     "is_deleted",
 ]
-TANK_HEADERS = ["date", "meter", "stock_liters", "dispensed_liters", "note"]
+TANK_HEADERS = [
+    "date",
+    "meter",
+    "stock_liters",
+    "dispensed_liters",
+    "note",
+    "purchased_liters",
+]
 FORBIDDEN_COLUMNS = {"address", "住所", "郵便番号", "電話番号"}
 
 
@@ -240,7 +247,7 @@ class GoogleSheetsRepository:
             self._call_with_retry(
                 lambda: worksheet.update(
                     values=[row_values],
-                    range_name=f"A{target_row}:E{target_row}",
+                    range_name=f"A{target_row}:F{target_row}",
                     value_input_option="USER_ENTERED",
                 )
             )
