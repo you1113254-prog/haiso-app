@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -32,6 +33,7 @@ DELIVERY_HEADERS = [
     "updated_at",
     "is_deleted",
 ]
+TANK_HEADERS = ["date", "meter", "stock_liters", "dispensed_liters", "note"]
 FORBIDDEN_COLUMNS = {"address", "住所", "郵便番号", "電話番号"}
 
 
@@ -43,6 +45,7 @@ class Repository(Protocol):
     def load_historical_refills(self) -> list[dict[str, Any]]: ...
     def load_deliveries(self) -> list[dict[str, Any]]: ...
     def load_tank_inventory(self) -> list[dict[str, Any]]: ...
+    def upsert_tank_inventory(self, record: dict[str, Any]) -> None: ...
     def append_delivery(self, record: dict[str, Any]) -> None: ...
     def update_delivery(self, record_id: str, record: dict[str, Any]) -> None: ...
 
@@ -61,6 +64,16 @@ def _normalize_sheet_row(row: dict[str, Any]) -> dict[str, Any]:
         if key in normalized:
             normalized[key] = as_bool(normalized[key])
     return normalized
+
+
+def _date_key(value: Any) -> str:
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return text
 
 
 class LocalCsvRepository:
@@ -92,6 +105,28 @@ class LocalCsvRepository:
 
     def load_tank_inventory(self) -> list[dict[str, Any]]:
         return self._read("tank_inventory.csv")
+
+    def upsert_tank_inventory(self, record: dict[str, Any]) -> None:
+        path = self.data_dir / "tank_inventory.csv"
+        rows = self.load_tank_inventory()
+        target = _date_key(record.get("date"))
+        replaced = False
+        for index, row in enumerate(rows):
+            if _date_key(row.get("date")) == target:
+                rows[index] = {**row, **record}
+                replaced = True
+                break
+        if not replaced:
+            rows.append(record)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".tmp")
+        with temp_path.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=TANK_HEADERS)
+            writer.writeheader()
+            writer.writerows(
+                {key: row.get(key, "") for key in TANK_HEADERS} for row in rows
+            )
+        temp_path.replace(path)
 
     def append_delivery(self, record: dict[str, Any]) -> None:
         path = self.data_dir / "delivery_records.csv"
@@ -135,17 +170,20 @@ class GoogleSheetsRepository:
         self._worksheet_not_found = gspread.WorksheetNotFound
         self._api_error = gspread.exceptions.APIError
 
-    def _read_values_with_retry(self, worksheet, attempts: int = 4) -> list[list[str]]:
+    def _call_with_retry(self, operation, attempts: int = 4):
         for attempt in range(attempts):
             try:
-                return worksheet.get_all_values()
+                return operation()
             except self._api_error as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 retryable = status in {429, 500, 502, 503, 504}
                 if not retryable or attempt == attempts - 1:
                     raise
                 time.sleep(2**attempt)
-        return []
+        return None
+
+    def _read_values_with_retry(self, worksheet, attempts: int = 4) -> list[list[str]]:
+        return self._call_with_retry(worksheet.get_all_values, attempts) or []
 
     def _records(self, sheet_name: str) -> list[dict[str, Any]]:
         worksheet = self.book.worksheet(sheet_name)
@@ -183,6 +221,29 @@ class GoogleSheetsRepository:
 
     def load_tank_inventory(self) -> list[dict[str, Any]]:
         return self._records("タンク在庫")
+
+    def upsert_tank_inventory(self, record: dict[str, Any]) -> None:
+        worksheet = self.book.worksheet("タンク在庫")
+        values = self._read_values_with_retry(worksheet)
+        target = _date_key(record.get("date"))
+        target_row = None
+        for row_number, values_row in enumerate(values[1:], start=2):
+            if values_row and _date_key(values_row[0]) == target:
+                target_row = row_number
+                break
+        row_values = [record.get(key, "") for key in TANK_HEADERS]
+        if target_row is None:
+            self._call_with_retry(
+                lambda: worksheet.append_row(row_values, value_input_option="USER_ENTERED")
+            )
+        else:
+            self._call_with_retry(
+                lambda: worksheet.update(
+                    f"A{target_row}:E{target_row}",
+                    [row_values],
+                    value_input_option="USER_ENTERED",
+                )
+            )
 
     def append_delivery(self, record: dict[str, Any]) -> None:
         worksheet = self.book.worksheet("配送記録")
