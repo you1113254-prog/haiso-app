@@ -247,9 +247,22 @@ class GoogleSheetsRepository:
 
     def append_delivery(self, record: dict[str, Any]) -> None:
         worksheet = self.book.worksheet("配送記録")
-        worksheet.append_row(
-            [record.get(key, "") for key in DELIVERY_HEADERS],
-            value_input_option="USER_ENTERED",
+        values = self._read_values_with_retry(worksheet)
+        record_id = str(record.get("record_id", "")).strip()
+        target_row = next(
+            (
+                row_number
+                for row_number, values_row in enumerate(values[1:], start=2)
+                if values_row and str(values_row[0]).strip() == record_id
+            ),
+            len(values) + 1,
+        )
+        self._call_with_retry(
+            lambda: worksheet.update(
+                values=[[record.get(key, "") for key in DELIVERY_HEADERS]],
+                range_name=f"A{target_row}:N{target_row}",
+                value_input_option="USER_ENTERED",
+            )
         )
 
     def update_delivery(self, record_id: str, record: dict[str, Any]) -> None:
