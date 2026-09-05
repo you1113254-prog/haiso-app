@@ -583,20 +583,28 @@ elif page == "日報表示":
     start_stock = as_float((previous_tank or {}).get("stock_liters"))
     end_stock = as_float((current_tank or {}).get("stock_liters"))
     used_liters = as_float((current_tank or {}).get("dispensed_liters"))
+    purchased_liters = as_float((current_tank or {}).get("purchased_liters"))
 
     st.markdown("#### タンク情報")
-    tank_cols = st.columns(5)
-    tank_cols[0].metric("開始メーター", f"{rounded_meter(start_meter):,}" if start_meter is not None else "—")
-    tank_cols[1].metric("終了メーター", f"{rounded_meter(end_meter):,}" if end_meter is not None else "未入力")
-    tank_cols[2].metric("当日使用量", f"{used_liters:,.1f}L" if used_liters is not None else "未入力")
-    tank_cols[3].metric("開始在庫", f"{start_stock:,.1f}L" if start_stock is not None else "—")
-    tank_cols[4].metric("終了在庫", f"{end_stock:,.1f}L" if end_stock is not None else "未入力")
+    tank_top = st.columns(3)
+    tank_top[0].metric("開始メーター", f"{rounded_meter(start_meter):,}" if start_meter is not None else "—")
+    tank_top[1].metric("終了メーター", f"{rounded_meter(end_meter):,}" if end_meter is not None else "未入力")
+    tank_top[2].metric("当日使用量", f"{used_liters:,.1f}L" if used_liters is not None else "未入力")
+    tank_bottom = st.columns(3)
+    tank_bottom[0].metric("灯油仕入", f"{purchased_liters:,.1f}L" if purchased_liters is not None else "0.0L")
+    tank_bottom[1].metric("開始在庫", f"{start_stock:,.1f}L" if start_stock is not None else "—")
+    tank_bottom[2].metric("終了在庫", f"{end_stock:,.1f}L" if end_stock is not None else "未入力")
 
     estimated_usage = report_summary["liters"]
     default_end_meter = rounded_meter(
         end_meter if end_meter is not None else (start_meter or 0) + estimated_usage
     ) or 0
-    default_end_stock = end_stock if end_stock is not None else max((start_stock or 0) - estimated_usage, 0)
+    default_purchase = purchased_liters if purchased_liters is not None else 0.0
+    default_end_stock = (
+        end_stock
+        if end_stock is not None
+        else max((start_stock or 0) + default_purchase - estimated_usage, 0)
+    )
     default_used = used_liters if used_liters is not None else estimated_usage
     with st.expander("タンク情報を入力・修正", expanded=current_tank is None):
         st.caption("未入力時は配送入力合計から参考値を入れています。実際のメーターと在庫を確認して保存してください。")
@@ -606,6 +614,14 @@ elif page == "日報表示":
             )
             tank_used = st.number_input(
                 "当日使用量（L）", min_value=0.0, value=float(default_used), step=0.1, format="%.1f"
+            )
+            tank_purchase = st.number_input(
+                "灯油仕入量（L）",
+                min_value=0.0,
+                value=float(default_purchase),
+                step=0.1,
+                format="%.1f",
+                help="当日にタンクへ仕入れた灯油量です。仕入れがない日は0.0Lのまま保存します。",
             )
             tank_stock = st.number_input(
                 "終了在庫（L）", min_value=0.0, value=float(default_end_stock), step=0.1, format="%.1f"
@@ -621,6 +637,7 @@ elif page == "日報表示":
                         "stock_liters": round(float(tank_stock), 1),
                         "dispensed_liters": round(float(tank_used), 1),
                         "note": tank_note.strip(),
+                        "purchased_liters": round(float(tank_purchase), 1),
                     }
                 )
                 refresh_data()
@@ -642,6 +659,7 @@ elif page == "日報表示":
         f"開始メーター {rounded_meter(start_meter) if start_meter is not None else '—'}／"
         f"終了メーター {rounded_meter(end_meter) if end_meter is not None else '未入力'}／"
         f"当日使用量 {f'{used_liters:.1f}L' if used_liters is not None else '未入力'}／"
+        f"灯油仕入 {f'{purchased_liters:.1f}L' if purchased_liters is not None else '0.0L'}／"
         f"開始在庫 {f'{start_stock:.1f}L' if start_stock is not None else '—'}／"
         f"終了在庫 {f'{end_stock:.1f}L' if end_stock is not None else '未入力'}"
     )
