@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -132,16 +133,34 @@ class GoogleSheetsRepository:
         client = gspread.service_account_from_dict(service_account)
         self.book = client.open_by_key(spreadsheet_id)
         self._worksheet_not_found = gspread.WorksheetNotFound
+        self._api_error = gspread.exceptions.APIError
+
+    def _read_values_with_retry(self, worksheet, attempts: int = 4) -> list[list[str]]:
+        for attempt in range(attempts):
+            try:
+                return worksheet.get_all_values()
+            except self._api_error as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                retryable = status in {429, 500, 502, 503, 504}
+                if not retryable or attempt == attempts - 1:
+                    raise
+                time.sleep(2**attempt)
+        return []
 
     def _records(self, sheet_name: str) -> list[dict[str, Any]]:
         worksheet = self.book.worksheet(sheet_name)
-        headers = worksheet.row_values(1)
+        values = self._read_values_with_retry(worksheet)
+        if not values:
+            return []
+        headers = values[0]
         _check_privacy(headers)
-        return [
-            _normalize_sheet_row(row)
-            for row in worksheet.get_all_records(numericise_ignore=["all"])
-            if any(str(value).strip() for value in row.values())
-        ]
+        rows: list[dict[str, Any]] = []
+        for values_row in values[1:]:
+            padded = values_row + [""] * max(0, len(headers) - len(values_row))
+            row = dict(zip(headers, padded[: len(headers)]))
+            if any(str(value).strip() for value in row.values()):
+                rows.append(_normalize_sheet_row(row))
+        return rows
 
     def load_customers(self) -> list[dict[str, Any]]:
         return [normalize_customer(row) for row in self._records("顧客マスター")]
