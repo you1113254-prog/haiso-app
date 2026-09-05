@@ -138,10 +138,14 @@ def refresh_data() -> None:
     st.session_state["tank_inventory"] = repo.load_tank_inventory()
 
 
-if (
-    "customers" not in st.session_state
-    or "historical_refills" not in st.session_state
-):
+required_data_keys = (
+    "customers",
+    "monthly_history",
+    "historical_refills",
+    "deliveries",
+    "tank_inventory",
+)
+if any(key not in st.session_state for key in required_data_keys):
     try:
         refresh_data()
     except Exception:
@@ -410,6 +414,14 @@ if page == "配送入力":
     ]
     entered_summary = summarize(entered_rows)
 
+    last_saved = st.session_state.get("last_saved_delivery")
+    if last_saved and last_saved.get("delivery_date") == delivery_date.isoformat():
+        st.success(
+            "Google Sheets保存確認済み："
+            f"{last_saved.get('customer_name', '')}／"
+            f"{format_liters(last_saved.get('liters'))}（{len(entered_rows)}件目）"
+        )
+
     st.markdown("#### この日の入力状況")
     entered_cols = st.columns(2)
     entered_cols[0].metric("入力済み", f"{len(entered_rows)}件")
@@ -516,6 +528,7 @@ if page == "配送入力":
                         *st.session_state.get("deliveries", []),
                         pending,
                     ]
+                    st.session_state["last_saved_delivery"] = pending
                     clear_pending()
                     st.success("配送記録を保存しました。")
                     st.rerun()
