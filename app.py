@@ -359,13 +359,35 @@ def dataframe_for_records(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(display)
 
 
+def parsed_inventory_date(row: dict):
+    parsed = pd.to_datetime(row.get("date"), errors="coerce")
+    return None if pd.isna(parsed) else parsed.date()
+
+
+def tank_rows_for(selected_date: date):
+    dated = []
+    for row in tank_inventory:
+        row_date = parsed_inventory_date(row)
+        if row_date is not None:
+            dated.append((row_date, row))
+    current = next(
+        (row for row_date, row in reversed(dated) if row_date == selected_date),
+        None,
+    )
+    previous_rows = [
+        (row_date, row) for row_date, row in dated if row_date < selected_date
+    ]
+    previous = max(previous_rows, key=lambda item: item[0])[1] if previous_rows else None
+    return current, previous
+
+
 now = datetime.now(JST)
 st.title("🛢️ 灯油配送台帳")
 
 with st.sidebar:
     page = st.radio(
         "メニュー",
-        ["配送入力", "顧客検索", "本日の記録", "月間チェック", "接続・使い方"],
+        ["配送入力", "顧客検索", "本日の記録", "日報表示", "月間チェック", "接続・使い方"],
     )
     st.caption(repo.mode_label)
     if st.button("ログアウト", width="stretch"):
@@ -487,6 +509,93 @@ elif page == "顧客検索":
             st.dataframe(dataframe_for_records(rows), hide_index=True, width="stretch")
         else:
             st.info("アプリで登録した配送履歴はまだありません。")
+
+
+elif page == "日報表示":
+    st.subheader("日報表示")
+    report_date = st.date_input("日報の日付", value=now.date(), key="report_date")
+    report_rows = [
+        row
+        for row in active_records(deliveries)
+        if str(row.get("delivery_date", "")) == report_date.isoformat()
+    ]
+    report_rows.sort(key=lambda row: str(row.get("delivery_time", "")))
+    report_summary = summarize(report_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("訪問", f"{report_summary['visits']}軒")
+    summary_cols[1].metric("補給", f"{report_summary['supplied']}軒")
+    summary_cols[2].metric("配送入力合計", f"{report_summary['liters']:,.1f}L")
+    summary_cols[3].metric("伝票計上", f"{report_summary['slips']}件")
+
+    current_tank, previous_tank = tank_rows_for(report_date)
+    start_meter = as_float((previous_tank or {}).get("meter"))
+    end_meter = as_float((current_tank or {}).get("meter"))
+    start_stock = as_float((previous_tank or {}).get("stock_liters"))
+    end_stock = as_float((current_tank or {}).get("stock_liters"))
+    used_liters = as_float((current_tank or {}).get("dispensed_liters"))
+
+    st.markdown("#### タンク情報")
+    tank_cols = st.columns(5)
+    tank_cols[0].metric("開始メーター", f"{start_meter:,.1f}" if start_meter is not None else "—")
+    tank_cols[1].metric("終了メーター", f"{end_meter:,.1f}" if end_meter is not None else "未入力")
+    tank_cols[2].metric("当日使用量", f"{used_liters:,.1f}L" if used_liters is not None else "未入力")
+    tank_cols[3].metric("開始在庫", f"{start_stock:,.1f}L" if start_stock is not None else "—")
+    tank_cols[4].metric("終了在庫", f"{end_stock:,.1f}L" if end_stock is not None else "未入力")
+
+    estimated_usage = report_summary["liters"]
+    default_end_meter = end_meter if end_meter is not None else (start_meter or 0) + estimated_usage
+    default_end_stock = end_stock if end_stock is not None else max((start_stock or 0) - estimated_usage, 0)
+    default_used = used_liters if used_liters is not None else estimated_usage
+    with st.expander("タンク情報を入力・修正", expanded=current_tank is None):
+        st.caption("未入力時は配送入力合計から参考値を入れています。実際のメーターと在庫を確認して保存してください。")
+        with st.form("tank_inventory_form"):
+            tank_meter = st.number_input(
+                "終了メーター", min_value=0.0, value=float(default_end_meter), step=0.1, format="%.1f"
+            )
+            tank_used = st.number_input(
+                "当日使用量（L）", min_value=0.0, value=float(default_used), step=0.1, format="%.1f"
+            )
+            tank_stock = st.number_input(
+                "終了在庫（L）", min_value=0.0, value=float(default_end_stock), step=0.1, format="%.1f"
+            )
+            tank_note = st.text_input("タンク備考", value=str((current_tank or {}).get("note", "")))
+            save_tank = st.form_submit_button("タンク情報を保存", type="primary", width="stretch")
+        if save_tank:
+            try:
+                repo.upsert_tank_inventory(
+                    {
+                        "date": report_date.isoformat(),
+                        "meter": round(float(tank_meter), 1),
+                        "stock_liters": round(float(tank_stock), 1),
+                        "dispensed_liters": round(float(tank_used), 1),
+                        "note": tank_note.strip(),
+                    }
+                )
+                refresh_data()
+                st.success("タンク情報を保存しました。")
+                st.rerun()
+            except Exception:
+                st.error("タンク情報を保存できませんでした。少し待って再試行してください。")
+
+    st.markdown("#### 配送明細")
+    if report_rows:
+        st.dataframe(dataframe_for_records(report_rows), hide_index=True, width="stretch")
+    else:
+        st.info("この日の配送記録はありません。")
+
+    report_text = (
+        f"{report_date.isoformat()} 日報\n"
+        f"訪問 {report_summary['visits']}軒／補給 {report_summary['supplied']}軒／"
+        f"灯油 {report_summary['liters']:.1f}L／伝票計上 {report_summary['slips']}件\n"
+        f"開始メーター {start_meter if start_meter is not None else '—'}／"
+        f"終了メーター {end_meter if end_meter is not None else '未入力'}／"
+        f"当日使用量 {f'{used_liters:.1f}L' if used_liters is not None else '未入力'}／"
+        f"開始在庫 {f'{start_stock:.1f}L' if start_stock is not None else '—'}／"
+        f"終了在庫 {f'{end_stock:.1f}L' if end_stock is not None else '未入力'}"
+    )
+    st.markdown("#### 日報まとめ")
+    st.code(report_text, language=None)
 
 
 elif page == "本日の記録":
