@@ -249,13 +249,15 @@ class GoogleSheetsRepository:
         worksheet = self.book.worksheet("配送記録")
         values = self._read_values_with_retry(worksheet)
         record_id = str(record.get("record_id", "")).strip()
+        if not record_id:
+            raise ValueError("配送記録IDがありません。")
         target_row = next(
             (
                 row_number
                 for row_number, values_row in enumerate(values[1:], start=2)
                 if values_row and str(values_row[0]).strip() == record_id
             ),
-            len(values) + 1,
+            max(len(values) + 1, 3),
         )
         self._call_with_retry(
             lambda: worksheet.update(
@@ -264,6 +266,9 @@ class GoogleSheetsRepository:
                 value_input_option="USER_ENTERED",
             )
         )
+        saved_row = self._call_with_retry(lambda: worksheet.row_values(target_row)) or []
+        if not saved_row or str(saved_row[0]).strip() != record_id:
+            raise RuntimeError("Google Sheetsへの保存を確認できませんでした。")
 
     def update_delivery(self, record_id: str, record: dict[str, Any]) -> None:
         worksheet = self.book.worksheet("配送記録")
