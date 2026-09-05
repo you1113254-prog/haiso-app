@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import io
+import hashlib
 import hmac
+import io
 import importlib
 import re
 import uuid
@@ -104,8 +105,8 @@ require_login()
 
 
 @st.cache_resource
-def build_repository(repository_schema_version: int):
-    del repository_schema_version
+def build_repository(repository_code_version: str):
+    del repository_code_version
     try:
         spreadsheet_id = str(st.secrets["spreadsheet_id"])
         service_account = dict(st.secrets["gcp_service_account"])
@@ -124,7 +125,10 @@ def build_repository(repository_schema_version: int):
 
 
 try:
-    repo = build_repository(2)
+    repository_code_version = hashlib.sha256(
+        (ROOT / "repository.py").read_bytes()
+    ).hexdigest()
+    repo = build_repository(repository_code_version)
 except Exception:
     st.error("Google Sheetsへ接続できません。管理者へ接続設定の確認を依頼してください。")
     st.stop()
