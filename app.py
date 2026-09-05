@@ -36,6 +36,7 @@ from app_core import (
     month_records,
     refill_cycle_summary,
     refill_timeline,
+    rounded_meter,
     slip_already_counted,
     summarize,
     validate_delivery,
@@ -401,6 +402,35 @@ with st.sidebar:
 if page == "配送入力":
     st.subheader("配送を記録")
     st.caption("入力欄をタップし、お客様名を一文字入力してください。名前・コード・エリア・R区分が候補に表示されます。")
+    delivery_date = st.date_input("配送日", value=now.date(), key="delivery_date")
+    entered_rows = [
+        row
+        for row in active_records(deliveries)
+        if str(row.get("delivery_date", "")) == delivery_date.isoformat()
+    ]
+    entered_summary = summarize(entered_rows)
+
+    st.markdown("#### この日の入力状況")
+    entered_cols = st.columns(2)
+    entered_cols[0].metric("入力済み", f"{len(entered_rows)}件")
+    entered_cols[1].metric("灯油量合計", f"{entered_summary['liters']:,.1f}L")
+    if entered_rows:
+        entered_table = [
+            {
+                "順番": index,
+                "時刻": row.get("delivery_time", ""),
+                "お客様": row.get("customer_name", ""),
+                "灯油(L)": as_float(row.get("liters")) or 0.0,
+                "結果": row.get("visit_status", ""),
+                "伝票": row.get("rental_slip_status", ""),
+            }
+            for index, row in enumerate(entered_rows, start=1)
+        ]
+        st.dataframe(pd.DataFrame(entered_table), hide_index=True, width="stretch")
+    else:
+        st.caption("この日の入力はまだありません。保存すると、ここへ順番に追加されます。")
+
+    st.divider()
     customer = customer_picker("delivery_customer")
 
     if customer:
@@ -408,7 +438,6 @@ if page == "配送入力":
         show_monthly_metrics(customer)
         show_refill_cycle(customer)
 
-        delivery_date = st.date_input("配送日", value=now.date(), key="delivery_date")
         delivery_time = st.time_input(
             "時刻", value=now.time().replace(second=0, microsecond=0), key="delivery_time"
         )
@@ -540,21 +569,23 @@ elif page == "日報表示":
 
     st.markdown("#### タンク情報")
     tank_cols = st.columns(5)
-    tank_cols[0].metric("開始メーター", f"{start_meter:,.1f}" if start_meter is not None else "—")
-    tank_cols[1].metric("終了メーター", f"{end_meter:,.1f}" if end_meter is not None else "未入力")
+    tank_cols[0].metric("開始メーター", f"{rounded_meter(start_meter):,}" if start_meter is not None else "—")
+    tank_cols[1].metric("終了メーター", f"{rounded_meter(end_meter):,}" if end_meter is not None else "未入力")
     tank_cols[2].metric("当日使用量", f"{used_liters:,.1f}L" if used_liters is not None else "未入力")
     tank_cols[3].metric("開始在庫", f"{start_stock:,.1f}L" if start_stock is not None else "—")
     tank_cols[4].metric("終了在庫", f"{end_stock:,.1f}L" if end_stock is not None else "未入力")
 
     estimated_usage = report_summary["liters"]
-    default_end_meter = end_meter if end_meter is not None else (start_meter or 0) + estimated_usage
+    default_end_meter = rounded_meter(
+        end_meter if end_meter is not None else (start_meter or 0) + estimated_usage
+    ) or 0
     default_end_stock = end_stock if end_stock is not None else max((start_stock or 0) - estimated_usage, 0)
     default_used = used_liters if used_liters is not None else estimated_usage
     with st.expander("タンク情報を入力・修正", expanded=current_tank is None):
         st.caption("未入力時は配送入力合計から参考値を入れています。実際のメーターと在庫を確認して保存してください。")
         with st.form("tank_inventory_form"):
             tank_meter = st.number_input(
-                "終了メーター", min_value=0.0, value=float(default_end_meter), step=0.1, format="%.1f"
+                "終了メーター", min_value=0, value=default_end_meter, step=1, format="%d"
             )
             tank_used = st.number_input(
                 "当日使用量（L）", min_value=0.0, value=float(default_used), step=0.1, format="%.1f"
@@ -569,7 +600,7 @@ elif page == "日報表示":
                 repo.upsert_tank_inventory(
                     {
                         "date": report_date.isoformat(),
-                        "meter": round(float(tank_meter), 1),
+                        "meter": int(tank_meter),
                         "stock_liters": round(float(tank_stock), 1),
                         "dispensed_liters": round(float(tank_used), 1),
                         "note": tank_note.strip(),
@@ -591,8 +622,8 @@ elif page == "日報表示":
         f"{report_date.isoformat()} 日報\n"
         f"訪問 {report_summary['visits']}軒／補給 {report_summary['supplied']}軒／"
         f"灯油 {report_summary['liters']:.1f}L／伝票計上 {report_summary['slips']}件\n"
-        f"開始メーター {start_meter if start_meter is not None else '—'}／"
-        f"終了メーター {end_meter if end_meter is not None else '未入力'}／"
+        f"開始メーター {rounded_meter(start_meter) if start_meter is not None else '—'}／"
+        f"終了メーター {rounded_meter(end_meter) if end_meter is not None else '未入力'}／"
         f"当日使用量 {f'{used_liters:.1f}L' if used_liters is not None else '未入力'}／"
         f"開始在庫 {f'{start_stock:.1f}L' if start_stock is not None else '—'}／"
         f"終了在庫 {f'{end_stock:.1f}L' if end_stock is not None else '未入力'}"
