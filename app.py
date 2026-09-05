@@ -483,8 +483,11 @@ if page == "配送入力":
             if confirm_col.button("確定して保存", type="primary", width="stretch"):
                 try:
                     repo.append_delivery(pending)
+                    st.session_state["deliveries"] = [
+                        *st.session_state.get("deliveries", []),
+                        pending,
+                    ]
                     clear_pending()
-                    refresh_data()
                     st.success("配送記録を保存しました。")
                     st.rerun()
                 except Exception as exc:
