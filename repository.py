@@ -239,8 +239,8 @@ class GoogleSheetsRepository:
         else:
             self._call_with_retry(
                 lambda: worksheet.update(
-                    f"A{target_row}:E{target_row}",
-                    [row_values],
+                    values=[row_values],
+                    range_name=f"A{target_row}:E{target_row}",
                     value_input_option="USER_ENTERED",
                 )
             )
@@ -260,7 +260,7 @@ class GoogleSheetsRepository:
         existing = dict(zip(DELIVERY_HEADERS, worksheet.row_values(cell.row)))
         merged = {**existing, **record}
         worksheet.update(
-            f"A{cell.row}:N{cell.row}",
-            [[merged.get(key, "") for key in DELIVERY_HEADERS]],
+            values=[[merged.get(key, "") for key in DELIVERY_HEADERS]],
+            range_name=f"A{cell.row}:N{cell.row}",
             value_input_option="USER_ENTERED",
         )
